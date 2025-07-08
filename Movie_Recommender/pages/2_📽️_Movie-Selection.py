@@ -63,13 +63,6 @@ if r.status_code in range(200,299):
             movie_ids.append(_id)
             movie_title.add(_title)
             movie_RD.add(_RD)
-            
-        
-
-
-
-
-
 
             
     else :
