@@ -13,7 +13,7 @@ st.set_page_config(
     page_title="CineSearch Pro",
     page_icon="🎬",
     layout="wide",
-    initial_sidebar_state="collapsed"
+    initial_sidebar_state="expanded"
 )
 
 # Custom CSS for modern UI
@@ -167,7 +167,7 @@ if detail_id:
     
     # Back button
     st.markdown(
-        '<a href="?" class="back-button">⬅ Back to Search</a>',
+        '<a href="?" class="back-button" target="_self">⬅ Back to Search</a>',
         unsafe_allow_html=True
     )
     
@@ -243,8 +243,8 @@ if detail_id:
 # ---------------- Search Page ---------------- #
 else:
     # Header with search
-    st.title("🎬 CineSearch Pro")
-    st.markdown("Discover your next favorite movie")
+    st.write('# Search your movie!')
+    st.markdown("Enter here!")
     
     search_query = st.text_input(
         "",
@@ -274,7 +274,7 @@ else:
                         
                         st.markdown(
                             f"""
-                            <a href="?movie_id={movie_id}" style="text-decoration: none; color: inherit;">
+                            <a href="?movie_id={movie_id}" style="text-decoration: none; color: inherit;" target="_self">
                                 <div class="movie-card">
                                     <img src="{poster_url}" alt="{title}" class="movie-poster" />
                                     <div class="movie-info">
