@@ -17,7 +17,7 @@ API_BASE_URL = "https://api.themoviedb.org/3"
 # Load dataset for top rated movies
 @st.cache_data
 def load_data():
-    return pd.read_csv("C:/Users/kench/Downloads/AI/Movie-Recommender/Movie_Recommender/dataset/TMDB_movie_dataset_v11.csv")
+    return pd.read_csv("dataset/TMDB_movie_dataset_v11.csv")
 
 # Fetch trending movies from API
 @st.cache_data
