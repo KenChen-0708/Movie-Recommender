@@ -214,7 +214,7 @@ if detail_id is not None:
         with col1:
             poster_path = movie.get("poster_path", None)
             if pd.notna(poster_path) and poster_path:
-                st.image(f"https://image.tmdb.org/t/p/w500{poster_path}", caption=movie.get("title", "No Title"))
+                st.image(f"https://image.tmdb.org/t/p/w400{poster_path}", caption=movie.get("title", "No Title"))
             else:
                 st.image("https://via.placeholder.com/500x750?text=No+Poster", caption=movie.get("title", "No Title"))
 
@@ -332,7 +332,7 @@ else:
                     
                     st.markdown(
                         f"""
-                        <a href="?movie_id={movie_id}" style="text-decoration: none; color: inherit;" target="_self">
+                        <a href="?movie_id={movie_id}" style="text-decoration: none; color: inherit;" target="_blank">
                             <div class="movie-card">
                                 <img src="{poster_url}" alt="{title}" class="movie-poster" />
                                 <div class="movie-info">
