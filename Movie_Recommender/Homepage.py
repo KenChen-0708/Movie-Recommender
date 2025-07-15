@@ -3,11 +3,15 @@ import pandas as pd
 import streamlit.components.v1 as components
 import requests
 import json
+from datetime import datetime
+import ast
 
 # Page configuration
 st.set_page_config(
-    page_title="Content Discovery Page",
+    page_title="CineSearch Pro",
     page_icon="🎬",
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
 # API configuration
@@ -17,7 +21,39 @@ API_BASE_URL = "https://api.themoviedb.org/3"
 # Load dataset for top rated movies
 @st.cache_data
 def load_data():
-    return pd.read_csv("dataset/TMDB_movie_dataset_v11.csv")
+    return pd.read_csv("dataset/TMDB_movie_dataset_v11.csv", dtype={'id': str})
+
+# Helper function to safely parse JSON-like strings
+def safe_parse_json(json_str):
+    try:
+        if pd.isna(json_str) or json_str == '':
+            return []
+        return ast.literal_eval(json_str)
+    except:
+        return []
+
+# Helper function to extract names from genre/cast data
+def extract_names(data_list, key='name'):
+    if not data_list:
+        return []
+    return [item.get(key, '') for item in data_list if isinstance(item, dict)]
+
+# Fetch movie details from API by TMDB ID
+@st.cache_data
+def fetch_movie_details_by_tmdb_id(tmdb_id):
+    try:
+        url = f"{API_BASE_URL}/movie/{tmdb_id}"
+        params = {
+            'api_key': API_KEY,
+            'language': 'en-US',
+            'append_to_response': 'credits'
+        }
+        response = requests.get(url, params=params)
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        st.error(f"Error fetching movie details: {e}")
+        return None
 
 # Fetch trending movies from API
 @st.cache_data
@@ -36,9 +72,11 @@ def fetch_trending_movies():
         for movie in data['results'][:30]:  # Get top 30
             if movie.get('poster_path') and not movie.get('adult', False):
                 movies.append({
+                    'id': str(movie.get('id')),
                     'title': movie.get('title', 'Unknown Title'),
                     'vote_average': movie.get('vote_average', 0),
-                    'poster_url': f"https://image.tmdb.org/t/p/w300{movie['poster_path']}"
+                    'poster_url': f"https://image.tmdb.org/t/p/w300{movie['poster_path']}",
+                    'source': 'api'
                 })
         return movies
     except Exception as e:
@@ -63,16 +101,101 @@ def fetch_now_playing_movies():
         for movie in data['results'][:30]:  # Get top 30
             if movie.get('poster_path') and not movie.get('adult', False):
                 movies.append({
+                    'id': str(movie.get('id')),
                     'title': movie.get('title', 'Unknown Title'),
                     'vote_average': movie.get('vote_average', 0),
-                    'poster_url': f"https://image.tmdb.org/t/p/w300{movie['poster_path']}"
+                    'poster_url': f"https://image.tmdb.org/t/p/w300{movie['poster_path']}",
+                    'source': 'api'
                 })
         return movies
     except Exception as e:
         st.error(f"Error fetching now playing movies: {e}")
         return []
 
-# Generate carousel HTML
+# Custom CSS for modern UI (enhanced from original search page)
+def load_custom_css():
+    st.markdown("""
+        <style>
+        :root {
+            --primary: #00d4ff;
+            --dark-bg: #0f0f15;
+            --card-bg: #1a1a25;
+            --text: #f0f0f0;
+            --text-secondary: #b0b0b0;
+        }
+        
+        html, body, .stApp {
+            background-color: var(--dark-bg);
+            color: var(--text);
+        }
+        
+        .detail-container {
+            background-color: var(--card-bg);
+            padding: 30px;
+            border-radius: 12px;
+            margin-bottom: 20px;
+            border: 1px solid #2a2a35;
+        }
+        
+        .back-button {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 8px 16px;
+            background: var(--card-bg);
+            border-radius: 8px;
+            margin-bottom: 20px;
+            transition: all 0.2s ease;
+            border: 1px solid #333;
+        }
+        
+        .back-button:hover {
+            background: #252535;
+            border-color: var(--primary);
+        }
+        
+        .detail-poster {
+            border-radius: 12px;
+            box-shadow: 0 10px 20px rgba(0, 0, 0, 0.3);
+            margin-bottom: 20px;
+        }
+        
+        .tagline {
+            font-style: italic;
+            color: var(--primary);
+            margin-bottom: 10px;
+        }
+        
+        .detail-section {
+            margin-bottom: 30px;
+        }
+        
+        .genre-badge {
+            display: inline-block;
+            background: rgba(0, 212, 255, 0.15);
+            color: var(--primary);
+            padding: 4px 12px;
+            border-radius: 50px;
+            margin-right: 8px;
+            margin-bottom: 8px;
+            font-size: 0.8rem;
+        }
+        
+        .rating-display {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            background: rgba(255, 193, 7, 0.15);
+            color: #ffc107;
+            padding: 8px 16px;
+            border-radius: 50px;
+            font-weight: 600;
+            font-size: 1.1rem;
+        }
+        </style>
+    """, unsafe_allow_html=True)
+
+# Generate carousel HTML with clickable cards using anchor tags
 def generate_carousel_html(movies, carousel_id, title):
     poster_html = f"""
 <style>
@@ -104,12 +227,26 @@ def generate_carousel_html(movies, carousel_id, title):
     overflow: hidden;
     box-shadow: 0 8px 25px rgba(0, 0, 0, 0.15);
     transition: transform 0.3s ease, box-shadow 0.3s ease;
-    cursor: pointer;
+    text-decoration: none;
+    color: inherit;
+    display: block;
 }}
 
 .movie-card:hover {{
     transform: translateY(-10px) scale(1.05);
     box-shadow: 0 15px 35px rgba(0, 0, 0, 0.3);
+    text-decoration: none;
+    color: inherit;
+}}
+
+.movie-card:visited {{
+    color: inherit;
+    text-decoration: none;
+}}
+
+.movie-card:focus {{
+    outline: 2px solid #00d4ff;
+    outline-offset: 2px;
 }}
 
 .movie-poster {{
@@ -245,14 +382,19 @@ def generate_carousel_html(movies, carousel_id, title):
         <div class="carousel-track" id="carouselTrack{carousel_id}">
 """
 
-    # Add movie cards to HTML
+    # Add movie cards to HTML with anchor tags
     for movie in movies:
         title = str(movie.get('title', 'Unknown Title'))[:50]
         rating = round(float(movie.get('vote_average', 0)), 1)
         poster_url = movie['poster_url']
+        movie_id = movie.get('id', '')
+        source = movie.get('source', 'dataset')
+        
+        # Create the URL with proper parameters
+        detail_url = f"?movie_id={movie_id}&source={source}"
         
         poster_html += f"""
-            <div class="movie-card">
+            <a href="{detail_url}" class="movie-card" target="_blank">
                 <img src="{poster_url}" alt="{title}" class="movie-poster" onerror="this.src='https://via.placeholder.com/200x280?text=No+Image'">
                 <div class="movie-info">
                     <h3 class="movie-title">{title}</h3>
@@ -261,7 +403,7 @@ def generate_carousel_html(movies, carousel_id, title):
                         <span>{rating}/10</span>
                     </div>
                 </div>
-            </div>
+            </a>
         """
 
     poster_html += f"""
@@ -373,67 +515,255 @@ track{carousel_id}.addEventListener('touchmove', (e) => {{
 track{carousel_id}.addEventListener('touchend', () => {{
     isDragging{carousel_id} = false;
 }});
+
+// Prevent carousel navigation when clicking on movie cards
+document.querySelectorAll('#carouselTrack{carousel_id} .movie-card').forEach(card => {{
+    card.addEventListener('click', (e) => {{
+        e.stopPropagation();
+    }});
+}});
 </script>
 """
     
     return poster_html
 
+# Movie detail page display
+def display_movie_details(movie_id, source='dataset'):
+    if source == 'api':
+        # Fetch from API
+        movie_data = fetch_movie_details_by_tmdb_id(movie_id)
+        if not movie_data:
+            st.error("Movie details not found.")
+            return
+        
+        # Convert API data to match dataset format
+        movie = {
+            'id': str(movie_data.get('id')),
+            'title': movie_data.get('title', 'No Title'),
+            'original_title': movie_data.get('original_title', ''),
+            'overview': movie_data.get('overview', ''),
+            'tagline': movie_data.get('tagline', ''),
+            'release_date': movie_data.get('release_date', ''),
+            'runtime': movie_data.get('runtime', 0),
+            'vote_average': movie_data.get('vote_average', 0),
+            'budget': movie_data.get('budget', 0),
+            'revenue': movie_data.get('revenue', 0),
+            'original_language': movie_data.get('original_language', ''),
+            'status': movie_data.get('status', ''),
+            'homepage': movie_data.get('homepage', ''),
+            'poster_path': movie_data.get('poster_path', ''),
+            'genres': movie_data.get('genres', []),
+            'cast': movie_data.get('credits', {}).get('cast', [])[:8] if movie_data.get('credits') else []
+        }
+    else:
+        # Fetch from dataset
+        df = load_data()
+        movie_detail = df[df['id'] == movie_id]
+        if movie_detail.empty:
+            st.error("Movie details not found.")
+            return
+        movie = movie_detail.iloc[0]
+
+    # Display movie details
+    col1, col2 = st.columns([1, 2])
+
+    with col1:
+        poster_path = movie.get("poster_path", None)
+        if pd.notna(poster_path) and poster_path:
+            if source == 'api':
+                poster_url = f"https://image.tmdb.org/t/p/w400{poster_path}"
+            else:
+                poster_url = f"https://image.tmdb.org/t/p/w400{poster_path}"
+            st.image(poster_url, caption=movie.get("title", "No Title"), use_container_width=True)
+        else:
+            st.image("https://via.placeholder.com/400x600?text=No+Poster", 
+                    caption=movie.get("title", "No Title"), use_container_width=True)
+
+    with col2:
+        st.title(movie.get("title", "No Title"))
+        
+        tagline = movie.get("tagline", "")
+        if pd.notna(tagline) and str(tagline).strip():
+            st.markdown(f'<div class="tagline">"{tagline}"</div>', unsafe_allow_html=True)
+
+        # Movie metadata
+        release = movie.get("release_date", "")
+        runtime = movie.get("runtime", "")
+        if pd.notna(release) and release:
+            try:
+                if isinstance(release, str):
+                    release = datetime.strptime(release, "%Y-%m-%d").strftime("%B %d, %Y")
+            except:
+                pass
+        
+        col_meta1, col_meta2 = st.columns(2)
+        with col_meta1:
+            st.write(f"**📅 Release Date:** {release if release else 'N/A'}")
+        with col_meta2:
+            st.write(f"**⏱️ Runtime:** {runtime} min" if runtime else "**⏱️ Runtime:** N/A")
+
+        # Rating
+        rating = movie.get("vote_average", None)
+        if pd.notna(rating) and rating:
+            st.markdown(f'<div class="rating-display">⭐ {rating}/10</div>', unsafe_allow_html=True)
+
+        # Genres
+        if source == 'api':
+            genres = movie.get("genres", [])
+            genre_names = [genre.get('name', '') for genre in genres] if genres else []
+        else:
+            genres = safe_parse_json(movie.get("genres", ""))
+            genre_names = extract_names(genres)
+        
+        if genre_names:
+            st.markdown("**🎞️ Genres:**")
+            for genre in genre_names:
+                st.markdown(f'<span class="genre-badge">{genre}</span>', unsafe_allow_html=True)
+
+        # Overview
+        # st.markdown("---")
+        st.subheader("📝 Overview")
+        overview = movie.get("overview", "")
+        if pd.notna(overview) and str(overview).strip():
+            st.write(overview)
+        else:
+            st.write("No description available.")
+
+        # Cast
+        if source == 'api':
+            cast_data = movie.get("cast", [])
+            cast_names = [actor.get('name', '') for actor in cast_data] if cast_data else []
+        else:
+            cast_data = safe_parse_json(movie.get("cast", ""))
+            cast_names = extract_names(cast_data)
+        
+        if cast_names:
+            st.subheader("👤 Top Cast")
+            st.write(", ".join(cast_names))
+
+        # Additional Information
+        # st.markdown("---")
+        st.subheader("📌 Additional Information")
+        
+        budget = movie.get("budget", 0)
+        revenue = movie.get("revenue", 0)
+        lang = movie.get("original_language", "")
+        status = movie.get("status", "")
+
+        if pd.notna(budget) and budget and int(budget) > 0:
+            st.write(f"**Budget:** ${int(budget):,}")
+        if pd.notna(revenue) and revenue and int(revenue) > 0:
+            st.write(f"**Revenue:** ${int(revenue):,}")
+        if pd.notna(lang) and lang:
+            st.write(f"**Original Language:** {lang.upper()}")
+        if pd.notna(status) and status:
+            st.write(f"**Status:** {status}")
+
+        homepage = movie.get("homepage", "")
+        if pd.notna(homepage) and homepage.strip():
+            st.markdown(f"🔗 [Official Website]({homepage})")
+
 # Main app
 def main():
-    # Load top rated movies from dataset
-    df = load_data()
-    df = df[df["adult"] != True]
+    load_custom_css()
     
-    # Calculate top rated movies
-    C = df["vote_average"].mean()
-    m = df["vote_count"].quantile(0.95)
-    qualified = df[df["vote_count"] >= m].copy()
+    # Check for movie_id in query params for detail view
+    movie_id = st.query_params.get("movie_id")
+    source = st.query_params.get("source", "dataset")
     
-    def weighted_rating(x, m=m, C=C):
-        v = x["vote_count"]
-        R = x["vote_average"]
-        return (v / (v + m) * R) + (m / (v + m) * C)
-    
-    qualified["score"] = qualified.apply(weighted_rating, axis=1)
-    top_rated = qualified.sort_values("score", ascending=False)
-    top_rated = top_rated.dropna(subset=["poster_path"]).head(30)
-    
-    # Convert to same format as API data
-    top_rated_movies = []
-    for _, movie in top_rated.iterrows():
-        top_rated_movies.append({
-            'title': movie.get('title', 'Unknown Title'),
-            'vote_average': movie.get('vote_average', 0),
-            'poster_url': f"https://image.tmdb.org/t/p/w300{movie['poster_path']}"
-        })
-    
-    # Fetch API data
-    trending_movies = fetch_trending_movies()
-    now_playing_movies = fetch_now_playing_movies()
-    
-    # Display sections
-    st.title("🎬 Movie Discovery")
-    
-    # Top Rated Movies
-    st.header("🏆 Top Rated Movies")
-    if top_rated_movies:
-        components.html(generate_carousel_html(top_rated_movies, "TopRated", "Top Rated Movies"), height=480)
+    if movie_id:
+        # Detail page
+        # if st.button("⬅ Back to Discovery"):
+        #     st.query_params.clear()
+        #     st.rerun()
+        
+        # st.markdown('<div class="detail-container">', unsafe_allow_html=True)
+        display_movie_details(movie_id, source)
+        st.markdown('</div>', unsafe_allow_html=True)
     else:
-        st.error("Unable to load top rated movies")
-    
-    # Trending Movies
-    st.header("🔥 Trending Movies")
-    if trending_movies:
-        components.html(generate_carousel_html(trending_movies, "Trending", "Trending Movies"), height=480)
-    else:
-        st.error("Unable to load trending movies")
-    
-    # Now Playing Movies
-    st.header("🎭 Now Playing")
-    if now_playing_movies:
-        components.html(generate_carousel_html(now_playing_movies, "NowPlaying", "Now Playing Movies"), height=480)
-    else:
-        st.error("Unable to load now playing movies")
+        # Main discovery page
+        # Load top rated movies from dataset
+        df = load_data()
+        df = df[df["adult"] != True]
+        
+        # Calculate top rated movies
+        C = df["vote_average"].mean()
+        m = df["vote_count"].quantile(0.95)
+        qualified = df[df["vote_count"] >= m].copy()
+        
+        def weighted_rating(x, m=m, C=C):
+            v = x["vote_count"]
+            R = x["vote_average"]
+            return (v / (v + m) * R) + (m / (v + m) * C)
+        
+        qualified["score"] = qualified.apply(weighted_rating, axis=1)
+        top_rated = qualified.sort_values("score", ascending=False)
+        top_rated = top_rated.dropna(subset=["poster_path"]).head(30)
+        
+        # Convert to same format as API data
+        top_rated_movies = []
+        for _, movie in top_rated.iterrows():
+            top_rated_movies.append({
+                'id': str(movie.get('id')),
+                'title': movie.get('title', 'Unknown Title'),
+                'vote_average': movie.get('vote_average', 0),
+                'poster_url': f"https://image.tmdb.org/t/p/w300{movie['poster_path']}",
+                'source': 'dataset'
+            })
+        
+
+        # Popular movies
+        popular_movies = (
+            df.dropna(subset=["poster_path"])
+            .sort_values("popularity", ascending=False)
+            .head(30)
+        )
+
+        # Convert to API-like format
+        popular_movies_list = []
+        for _, movie in popular_movies.iterrows():
+            popular_movies_list.append({
+                'id': str(movie.get('id')),
+                'title': movie.get('title', 'Unknown Title'),
+                'vote_average': movie.get('vote_average', 0),
+                'poster_url': f"https://image.tmdb.org/t/p/w300{movie['poster_path']}",
+                'source': 'dataset'
+            })
+
+        # Fetch API data
+        trending_movies = fetch_trending_movies()
+        now_playing_movies = fetch_now_playing_movies()
+        
+        # Display sections
+        st.title("🎬 Movie Discovery")
+        
+        # Trending Movies
+        st.header("🔥 Trending Movies")
+        if trending_movies:
+            components.html(generate_carousel_html(trending_movies, "Trending", "Trending Movies"), height=480)
+        else:
+            st.error("Unable to load trending movies")
+
+        # Top Rated Movies
+        st.header("🏆 Top Rated Movies")
+        if top_rated_movies:
+            components.html(generate_carousel_html(top_rated_movies, "TopRated", "Top Rated Movies"), height=480)
+        else:
+            st.error("Unable to load top rated movies")
+        
+        # Popular Movies
+        st.header("🌟 Popular Movies")
+        if popular_movies_list:
+            components.html(generate_carousel_html(popular_movies_list, "Popular", "Popular Movies"), height=480)
+        else:
+            st.error("Unable to load popular movies")
+
+        # Now Playing Movies
+        st.header("🎭 Now Playing")
+        if now_playing_movies:
+            components.html(generate_carousel_html(now_playing_movies, "NowPlaying", "Now Playing Movies"), height=480)
+        else:
+            st.error("Unable to load now playing movies")
 
 if __name__ == "__main__":
     main()
