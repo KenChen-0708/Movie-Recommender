@@ -2,16 +2,17 @@ import streamlit as st
 import pandas as pd
 import streamlit.components.v1 as components
 import requests
-import json
 from datetime import datetime
 import ast
+from datetime import datetime
+
 
 # Page configuration
 st.set_page_config(
     page_title="CineSearch Pro",
     page_icon="🎬",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="collapsed"
 )
 
 # API configuration
@@ -21,7 +22,116 @@ API_BASE_URL = "https://api.themoviedb.org/3"
 # Load dataset for top rated movies
 @st.cache_data
 def load_data():
-    return pd.read_csv("dataset/TMDB_movie_dataset_v11.csv", dtype={'id': str})
+    # Specify the columns to load for efficiency
+    cols_needed = ['id', 'title', 'vote_average', 'vote_count', 'release_date', 'runtime', 
+                   'adult', 'homepage', 'original_language', 'overview', 'popularity', 
+                   'poster_path', 'tagline', 'genres']
+    
+    return pd.read_csv("dataset/TMDB_movie_dataset_v11.csv", usecols=cols_needed, dtype={'id': str})
+
+def load_navbar():
+    st.markdown("""
+    <style>
+    /* App background */
+    html, body, .stApp {
+        background: linear-gradient(135deg, #1e1e2f, #2e2e4e);
+        color: white;
+        font-family: 'Segoe UI', sans-serif;
+    }
+
+    /* Navigation bar container */
+    .navbar {
+        background: linear-gradient(90deg, #2e2f47, #3c3e5f);
+        padding: 1rem 2rem;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        border-radius: 12px;
+        box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+        margin-bottom: 2rem;
+        position: sticky;
+        top: 0;
+        z-index: 999;
+    }
+
+    /* Logo styling */
+    .navbar-logo a {
+        font-size: 1.7rem;
+        font-weight: 700;
+        color: white;
+        text-decoration: none;
+        transition: all 0.3s ease;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+    }
+
+    .navbar-logo a:hover {
+        color: #d8b4fe;
+        transform: scale(1.03);
+        text-shadow: 0 0 8px rgba(216, 180, 254, 0.4);
+    }
+
+    /* Navigation links */
+    .navbar-links {
+        display: flex;
+        gap: 1rem;
+    }
+
+    .navbar-links a {
+        color: white;
+        text-decoration: none;
+        padding: 0.5rem 1rem;
+        border-radius: 8px;
+        font-weight: 600;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        transition: all 0.3s ease;
+    }
+
+    .navbar-links a:hover {
+        background-color: rgba(255, 255, 255, 0.07);
+        transform: translateY(-2px);
+        color: #d8b4fe;
+        text-shadow: 0 0 8px rgba(216, 180, 254, 0.5);
+    }
+
+    /* Active link (optional logic can assign class='active') */
+    .navbar-links a.active {
+        background-color: rgba(216, 180, 254, 0.15);
+        color: #d8b4fe;
+    }
+
+    /* Responsive behavior */
+    @media (max-width: 768px) {
+        .navbar {
+            flex-direction: column;
+            align-items: flex-start;
+            gap: 0.8rem;
+        }
+
+        .navbar-links {
+            flex-direction: column;
+            align-items: flex-start;
+        }
+    }
+    </style>
+
+    <div class="navbar">
+        <div class="navbar-logo">
+            <a href="/" target="_self">🎬 CineSearch Pro</a>
+        </div>
+        <div class="navbar-links">
+            <a href="/" target="_self">🏠 Home</a>
+            <a href="/Movie-Selection" target="_self">🔍 Movie Search</a>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+
+
+
 
 # Helper function to safely parse JSON-like strings
 def safe_parse_json(json_str):
@@ -38,6 +148,119 @@ def extract_names(data_list, key='name'):
         return []
     return [item.get(key, '') for item in data_list if isinstance(item, dict)]
 
+# Fetch genres from TMDB API
+@st.cache_data
+def fetch_genres():
+    try:
+        url = f"{API_BASE_URL}/genre/movie/list"
+        params = {
+            'api_key': API_KEY,
+            'language': 'en-US'
+        }
+        response = requests.get(url, params=params)
+        response.raise_for_status()
+        data = response.json()
+        return data.get('genres', [])
+    except Exception as e:
+        st.error(f"Error fetching genres: {e}")
+        return []
+
+# Fetch languages from TMDB API
+@st.cache_data
+def fetch_languages():
+    try:
+        url = f"{API_BASE_URL}/configuration/languages"
+        params = {
+            'api_key': API_KEY
+        }
+        response = requests.get(url, params=params)
+        response.raise_for_status()
+        data = response.json()
+        
+        # Define a function to check if a string is composed of only "?" characters
+        def is_invalid(value):
+            return value and all(c == '?' for c in value)
+        
+        # Filter out languages with invalid names or iso_639_1 codes
+        valid_languages = [
+            lang for lang in data
+            if lang.get('name') and not is_invalid(lang.get('name')) and len(lang.get('iso_639_1', '')) == 2 and not is_invalid(lang.get('iso_639_1'))
+        ]
+        
+        return sorted(valid_languages, key=lambda x: x.get('name', ''))
+        
+    except Exception as e:
+        st.error(f"Error fetching languages: {e}")
+        return []
+
+
+# Fetch filtered movies from TMDB API
+@st.cache_data
+def fetch_filtered_movies(genre_ids=None, release_date_gte=None, release_date_lte=None, language=None):
+    try:
+        url = f"{API_BASE_URL}/discover/movie"
+        params = {
+            'api_key': API_KEY,
+            'language': 'en-US',
+            'sort_by': 'vote_average.desc',
+            'vote_count.gte': 100,  # Minimum vote count for better recommendations
+            'page': 1,
+            'per_page': 20
+        }
+        
+        # Add filters if provided
+        if genre_ids:
+            params['with_genres'] = ','.join(map(str, genre_ids))
+        if release_date_gte:
+            params['primary_release_date.gte'] = release_date_gte
+        if release_date_lte:
+            params['primary_release_date.lte'] = release_date_lte
+        if language and language != 'all':
+            params['with_original_language'] = language
+        
+        # Get first page
+        response = requests.get(url, params=params)
+        response.raise_for_status()
+        data = response.json()
+        
+        movies = []
+        # Get movies from first page
+        for movie in data['results']:
+            if movie.get('poster_path') and not movie.get('adult', False):
+                movies.append({
+                    'id': str(movie.get('id')),
+                    'title': movie.get('title', 'Unknown Title'),
+                    'vote_average': movie.get('vote_average', 0),
+                    'poster_url': f"https://image.tmdb.org/t/p/w300{movie['poster_path']}",
+                    'release_date': movie.get('release_date', ''),
+                    'source': 'api'
+                })
+        
+        # Get second page if we need more movies
+        if len(movies) < 40 and data.get('total_pages', 1) > 1:
+            params['page'] = 2
+            response = requests.get(url, params=params)
+            response.raise_for_status()
+            data = response.json()
+            
+            for movie in data['results']:
+                if len(movies) >= 40:
+                    break
+                if movie.get('poster_path') and not movie.get('adult', False):
+                    movies.append({
+                        'id': str(movie.get('id')),
+                        'title': movie.get('title', 'Unknown Title'),
+                        'vote_average': movie.get('vote_average', 0),
+                        'poster_url': f"https://image.tmdb.org/t/p/w300{movie['poster_path']}",
+                        'release_date': movie.get('release_date', ''),
+                        'source': 'api'
+                    })
+        
+        return movies[:40]  # Return maximum 40 movies
+    except Exception as e:
+        st.error(f"Error fetching filtered movies: {e}")
+        return []
+    
 # Fetch movie details from API by TMDB ID
 @st.cache_data
 def fetch_movie_details_by_tmdb_id(tmdb_id):
@@ -191,6 +414,84 @@ def load_custom_css():
             border-radius: 50px;
             font-weight: 600;
             font-size: 1.1rem;
+        }
+        
+        .filter-container {
+            background: var(--card-bg);
+            padding: 25px;
+            border-radius: 12px;
+            margin-bottom: 30px;
+            border: 1px solid #2a2a35;
+        }
+        
+        .filter-row {
+            display: flex;
+            gap: 20px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+        
+        .filter-group {
+            flex: 1;
+            min-width: 200px;
+        }
+        
+        .filter-label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: var(--text);
+        }
+        
+        .filter-button {
+            background: linear-gradient(135deg, var(--primary), #0099cc);
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            margin-top: 10px;
+        }
+        
+        .filter-button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0, 212, 255, 0.3);
+        }
+        
+        .clear-button {
+            background: #dc3545;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            margin-top: 10px;
+            margin-left: 10px;
+        }
+        
+        .clear-button:hover {
+            background: #c82333;
+            transform: translateY(-2px);
+        }
+        
+        .filtered-results {
+            margin-top: 30px;
+        }
+        
+        .results-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+        
+        .results-count {
+            color: var(--text-secondary);
+            font-size: 0.9rem;
         }
         </style>
     """, unsafe_allow_html=True)
@@ -527,6 +828,131 @@ document.querySelectorAll('#carouselTrack{carousel_id} .movie-card').forEach(car
     
     return poster_html
 
+def display_movie_filters():
+    # st.markdown('<div class="filter-container">', unsafe_allow_html=True)
+    st.subheader("🎯 Filter Movies")
+    
+    # Initialize session state for filters
+    if 'filtered_movies' not in st.session_state:
+        st.session_state.filtered_movies = []
+    if 'filter_applied' not in st.session_state:
+        st.session_state.filter_applied = False
+    if 'filter_expanded' not in st.session_state:
+        st.session_state.filter_expanded = False
+    
+    # Fetch data for dropdowns
+    genres = fetch_genres()
+    languages = fetch_languages()
+    
+    # Create collapsible filter section
+    with st.expander("Show / Hide", expanded=st.session_state.filter_expanded):
+        # Create filter form
+        with st.form(key='movie_filters'):
+
+            # Genre filter
+            genre_options = [{'label': 'All Genres', 'value': None}] + [{'label': genre['name'], 'value': genre['id']} for genre in genres]
+            selected_genres = st.multiselect(
+                "🎭 Select Genres",
+                options=[g['value'] for g in genre_options if g['value'] is not None],
+                format_func=lambda x: next(g['label'] for g in genre_options if g['value'] == x),
+                help="Choose one or more genres"
+            )
+            st.write("")
+
+            # Language filter
+            language_options = [{'label': 'All Languages', 'value': 'all'}] + [{'label': lang['name'], 'value': lang['iso_639_1']} for lang in languages[:100]]
+            selected_language = st.selectbox(
+                "🌐 Original Language",
+                options=[l['value'] for l in language_options],
+                format_func=lambda x: next(l['label'] for l in language_options if l['value'] == x),
+                help="Choose original language"
+            )
+            st.write("")
+
+            # Release date filter
+            st.write("📅 Release Date Range:")
+            date_col1, date_col2 = st.columns(2)
+            with date_col1:
+                start_date = st.date_input(
+                    "From",
+                    value=None,
+                    min_value=datetime(1900, 1, 1).date(),
+                    max_value=datetime.now().date(),
+                    help="Select start date"
+                )
+            with date_col2:
+                end_date = st.date_input(
+                    "To",
+                    value=None,
+                    min_value=datetime(1900, 1, 1).date(),
+                    max_value=datetime.now().date(),
+                    help="Select end date"
+                )
+            
+            st.write("")
+            st.write("")
+            
+            # Filter and Clear buttons
+            button_col1, button_col2 = st.columns([1, 1])
+            with button_col1:
+                filter_submitted = st.form_submit_button("🔍 Apply Filters", use_container_width=True)
+            with button_col2:
+                clear_submitted = st.form_submit_button("🗑️ Clear Filters", use_container_width=True)
+        
+        # Handle filter submission
+        if filter_submitted:
+            # Prepare filter parameters
+            genre_ids = selected_genres if selected_genres else None
+            release_date_gte = start_date.strftime('%Y-%m-%d') if start_date else None
+            release_date_lte = end_date.strftime('%Y-%m-%d') if end_date else None
+            language = selected_language if selected_language != 'all' else None
+            
+            # Validate date range
+            if start_date and end_date and start_date > end_date:
+                st.error("Start date must be before end date!")
+                return
+            
+            with st.spinner("🔍 Searching for movies..."):
+                # Fetch filtered movies
+                filtered_movies = fetch_filtered_movies(
+                    genre_ids=genre_ids,
+                    release_date_gte=release_date_gte,
+                    release_date_lte=release_date_lte,
+                    language=language
+                )
+                
+                st.session_state.filtered_movies = filtered_movies
+                st.session_state.filter_applied = True
+        
+        # Handle clear filters
+        if clear_submitted:
+            st.session_state.filtered_movies = []
+            st.session_state.filter_applied = False
+            st.rerun()
+    
+    # st.markdown('</div>', unsafe_allow_html=True)
+    
+    # Display filtered results
+    if st.session_state.filter_applied:
+        st.markdown('<div class="filtered-results">', unsafe_allow_html=True)
+        
+        if st.session_state.filtered_movies:
+            # Results header
+            st.markdown('<div class="results-header">', unsafe_allow_html=True)
+            st.subheader("🎬 Filtered Results")
+            st.markdown(f'<span class="results-count">Found {len(st.session_state.filtered_movies)} movies</span>', unsafe_allow_html=True)
+            st.markdown('</div>', unsafe_allow_html=True)
+            
+            # Display filtered movies in carousel
+            components.html(
+                generate_carousel_html(st.session_state.filtered_movies, "Filtered", "Filtered Movies"), 
+                height=480
+            )
+        else:
+            st.warning("No movies found matching your criteria. Try adjusting your filters.")
+        
+        st.markdown('</div>', unsafe_allow_html=True)
+
 # Movie detail page display
 def display_movie_details(movie_id, source='dataset'):
     if source == 'api':
@@ -665,6 +1091,8 @@ def display_movie_details(movie_id, source='dataset'):
 
 # Main app
 def main():
+    load_navbar()
+
     load_custom_css()
     
     # Check for movie_id in query params for detail view
@@ -737,33 +1165,38 @@ def main():
         # Display sections
         st.title("🎬 Movie Discovery")
         
-        # Trending Movies
-        st.header("🔥 Trending Movies")
-        if trending_movies:
-            components.html(generate_carousel_html(trending_movies, "Trending", "Trending Movies"), height=480)
-        else:
-            st.error("Unable to load trending movies")
-
-        # Top Rated Movies
-        st.header("🏆 Top Rated Movies")
-        if top_rated_movies:
-            components.html(generate_carousel_html(top_rated_movies, "TopRated", "Top Rated Movies"), height=480)
-        else:
-            st.error("Unable to load top rated movies")
+        # Add the filtering UI
+        display_movie_filters()
         
-        # Popular Movies
-        st.header("🌟 Popular Movies")
-        if popular_movies_list:
-            components.html(generate_carousel_html(popular_movies_list, "Popular", "Popular Movies"), height=480)
-        else:
-            st.error("Unable to load popular movies")
+        # Only show the original carousels if no filter is applied
+        if not st.session_state.get('filter_applied', False):
+            # Trending Movies
+            st.header("🔥 Trending Movies")
+            if trending_movies:
+                components.html(generate_carousel_html(trending_movies, "Trending", "Trending Movies"), height=480)
+            else:
+                st.error("Unable to load trending movies")
 
-        # Now Playing Movies
-        st.header("🎭 Now Playing")
-        if now_playing_movies:
-            components.html(generate_carousel_html(now_playing_movies, "NowPlaying", "Now Playing Movies"), height=480)
-        else:
-            st.error("Unable to load now playing movies")
+            # Top Rated Movies
+            st.header("🏆 Top Rated Movies")
+            if top_rated_movies:
+                components.html(generate_carousel_html(top_rated_movies, "TopRated", "Top Rated Movies"), height=480)
+            else:
+                st.error("Unable to load top rated movies")
+            
+            # Popular Movies
+            st.header("🌟 Popular Movies")
+            if popular_movies_list:
+                components.html(generate_carousel_html(popular_movies_list, "Popular", "Popular Movies"), height=480)
+            else:
+                st.error("Unable to load popular movies")
+
+            # Now Playing Movies
+            st.header("🎭 Now Playing")
+            if now_playing_movies:
+                components.html(generate_carousel_html(now_playing_movies, "NowPlaying", "Now Playing Movies"), height=480)
+            else:
+                st.error("Unable to load now playing movies")
 
 if __name__ == "__main__":
     main()
