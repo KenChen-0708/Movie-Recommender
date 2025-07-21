@@ -4,8 +4,11 @@ import streamlit.components.v1 as components
 import requests
 from datetime import datetime
 import ast
-from datetime import datetime
-
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+import numpy as np
+from collections import Counter
+import re
 
 # Page configuration
 st.set_page_config(
@@ -28,6 +31,275 @@ def load_data():
                    'poster_path', 'tagline', 'genres']
     
     return pd.read_csv("dataset/TMDB_movie_dataset_v11.csv", usecols=cols_needed, dtype={'id': str})
+
+def create_content_features(df):
+    """Create content-based features for recommendation system"""
+    # Create a copy to avoid modifying original data
+    df_features = df.copy()
+    
+    # Clean and prepare text data
+    df_features['overview'] = df_features['overview'].fillna('')
+    df_features['tagline'] = df_features['tagline'].fillna('')
+    df_features['genres'] = df_features['genres'].fillna('[]')
+    
+    # Parse genres and create genre string
+    def extract_genre_names(genre_str):
+        try:
+            genres = safe_parse_json(genre_str)
+            return ' '.join([genre.get('name', '').lower() for genre in genres])
+        except:
+            return ''
+    
+    df_features['genre_names'] = df_features['genres'].apply(extract_genre_names)
+    
+    # Create combined content string for each movie
+    df_features['content'] = (
+        df_features['overview'] + ' ' + 
+        df_features['tagline'] + ' ' + 
+        df_features['genre_names']
+    ).str.lower()
+    
+    # Clean content text
+    df_features['content'] = df_features['content'].str.replace('[^a-zA-Z0-9\s]', '', regex=True)
+    
+    return df_features
+
+# Add this function to build the recommendation model
+@st.cache_data
+def build_recommendation_model():
+    """Build content-based recommendation model"""
+    try:
+        df = load_data()
+        df_features = create_content_features(df)
+        
+        # Create TF-IDF matrix
+        tfidf = TfidfVectorizer(
+            max_features=10000,
+            stop_words='english',
+            ngram_range=(1, 2),
+            min_df=2,
+            max_df=0.8
+        )
+        
+        # Fit and transform the content
+        tfidf_matrix = tfidf.fit_transform(df_features['content'])
+        
+        # Compute cosine similarity matrix
+        cosine_sim = cosine_similarity(tfidf_matrix, tfidf_matrix)
+        
+        # Create indices mapping
+        indices = pd.Series(df_features.index, index=df_features['id']).drop_duplicates()
+        
+        return cosine_sim, indices, df_features
+        
+    except Exception as e:
+        st.error(f"Error building recommendation model: {e}")
+        return None, None, None
+
+# Add this function to get content-based recommendations
+def get_content_recommendations(movie_id, num_recommendations=20):
+    """Get content-based recommendations for a movie"""
+    try:
+        cosine_sim, indices, df_features = build_recommendation_model()
+        
+        if cosine_sim is None:
+            return []
+        
+        # Get the index of the movie
+        if movie_id not in indices:
+            return []
+        
+        idx = indices[movie_id]
+        
+        # Get similarity scores
+        sim_scores = list(enumerate(cosine_sim[idx]))
+        
+        # Sort movies based on similarity scores
+        sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)
+        
+        # Get indices of most similar movies (excluding the movie itself)
+        movie_indices = [i[0] for i in sim_scores[1:num_recommendations+1]]
+        
+        # Get recommended movies
+        recommended_movies = []
+        for i in movie_indices:
+            movie = df_features.iloc[i]
+            if pd.notna(movie.get('poster_path')) and movie.get('poster_path'):
+                recommended_movies.append({
+                    'id': str(movie.get('id')),
+                    'title': movie.get('title', 'Unknown Title'),
+                    'vote_average': movie.get('vote_average', 0),
+                    'poster_url': f"https://image.tmdb.org/t/p/w300{movie['poster_path']}",
+                    'source': 'dataset',
+                    'similarity_score': sim_scores[movie_indices.index(i) + 1][1]
+                })
+        
+        return recommended_movies
+        
+    except Exception as e:
+        st.error(f"Error generating recommendations: {e}")
+        return []
+
+# Add this function to get hybrid recommendations (content + popularity)
+def get_hybrid_recommendations(movie_id=None, num_recommendations=20):
+    """Get hybrid recommendations combining content-based and popularity"""
+    try:
+        df = load_data()
+        df = df[df["adult"] != True]
+        
+        if movie_id:
+            # Get content-based recommendations
+            content_recs = get_content_recommendations(movie_id, num_recommendations * 2)
+            
+            if content_recs:
+                # Add popularity boost
+                for rec in content_recs:
+                    movie_data = df[df['id'] == rec['id']]
+                    if not movie_data.empty:
+                        popularity = movie_data.iloc[0].get('popularity', 0)
+                        vote_count = movie_data.iloc[0].get('vote_count', 0)
+                        
+                        # Hybrid score combining similarity and popularity
+                        rec['hybrid_score'] = (
+                            rec['similarity_score'] * 0.7 + 
+                            (popularity / df['popularity'].max()) * 0.2 +
+                            (vote_count / df['vote_count'].max()) * 0.1
+                        )
+                
+                # Sort by hybrid score
+                content_recs.sort(key=lambda x: x.get('hybrid_score', 0), reverse=True)
+                return content_recs[:num_recommendations]
+        
+        # Fallback to top-rated movies if no specific movie ID
+        C = df["vote_average"].mean()
+        m = df["vote_count"].quantile(0.9)
+        qualified = df[df["vote_count"] >= m].copy()
+        
+        def weighted_rating(x, m=m, C=C):
+            v = x["vote_count"]
+            R = x["vote_average"]
+            return (v / (v + m) * R) + (m / (v + m) * C)
+        
+        qualified["score"] = qualified.apply(weighted_rating, axis=1)
+        top_movies = qualified.sort_values("score", ascending=False)
+        top_movies = top_movies.dropna(subset=["poster_path"]).head(num_recommendations)
+        
+        recommendations = []
+        for _, movie in top_movies.iterrows():
+            recommendations.append({
+                'id': str(movie.get('id')),
+                'title': movie.get('title', 'Unknown Title'),
+                'vote_average': movie.get('vote_average', 0),
+                'poster_url': f"https://image.tmdb.org/t/p/w300{movie['poster_path']}",
+                'source': 'dataset'
+            })
+        
+        return recommendations
+        
+    except Exception as e:
+        st.error(f"Error generating hybrid recommendations: {e}")
+        return []
+
+# display AI recommendations in movie detail page
+def display_ai_recommendations(movie_id, source='dataset'):
+    """Display AI-powered recommendations for the current movie"""
+    st.header("🤖 AI Recommendations")
+    st.subheader("Movies You Might Like")
+    
+    with st.spinner("🧠 Generating personalized recommendations..."):
+        if source == 'dataset':
+            recommendations = get_hybrid_recommendations(movie_id, num_recommendations=20)
+        else:
+            # For API movies, try to find similar movies in dataset or use fallback
+            recommendations = get_hybrid_recommendations(num_recommendations=20)
+    
+    if recommendations:
+        st.success(f"Found {len(recommendations)} personalized recommendations based on content similarity!")
+        components.html(
+            generate_carousel_html(recommendations, "AIRecs", "AI Recommendations"), 
+            height=480
+        )
+    else:
+        st.warning("Unable to generate recommendations at this time.")
+
+# Add this function to get genre-based smart recommendations
+def get_smart_genre_recommendations(selected_genres, num_recommendations=40):
+    """Get smart recommendations based on selected genres using AI scoring"""
+    try:
+        df = load_data()
+        df = df[df["adult"] != True]
+        df_features = create_content_features(df)
+        
+        if not selected_genres:
+            return get_hybrid_recommendations(num_recommendations=num_recommendations)
+        
+        # Filter movies by selected genres
+        genre_filtered_movies = []
+        
+        for _, movie in df_features.iterrows():
+            movie_genres = safe_parse_json(movie.get('genres', '[]'))
+            movie_genre_ids = [g.get('id') for g in movie_genres if g.get('id')]
+            
+            # Check if movie has at least one selected genre
+            if any(genre_id in selected_genres for genre_id in movie_genre_ids):
+                if pd.notna(movie.get('poster_path')) and movie.get('poster_path'):
+                    # Calculate genre match score
+                    match_score = len(set(selected_genres) & set(movie_genre_ids)) / len(selected_genres)
+                    
+                    # Calculate popularity and rating scores
+                    popularity_score = movie.get('popularity', 0) / df['popularity'].max()
+                    rating_score = movie.get('vote_average', 0) / 10
+                    vote_count_score = movie.get('vote_count', 0) / df['vote_count'].max()
+                    
+                    # Combined AI score
+                    ai_score = (
+                        match_score * 0.4 +  # Genre match importance
+                        rating_score * 0.3 +  # Rating importance
+                        popularity_score * 0.2 +  # Popularity importance
+                        vote_count_score * 0.1   # Vote count importance
+                    )
+                    
+                    genre_filtered_movies.append({
+                        'id': str(movie.get('id')),
+                        'title': movie.get('title', 'Unknown Title'),
+                        'vote_average': movie.get('vote_average', 0),
+                        'poster_url': f"https://image.tmdb.org/t/p/w300{movie['poster_path']}",
+                        'source': 'dataset',
+                        'ai_score': ai_score,
+                        'genre_match_score': match_score
+                    })
+        
+        # Sort by AI score
+        genre_filtered_movies.sort(key=lambda x: x['ai_score'], reverse=True)
+        
+        return genre_filtered_movies[:num_recommendations]
+        
+    except Exception as e:
+        st.error(f"Error generating smart genre recommendations: {e}")
+        return []
+
+# Modified fetch_filtered_movies function to include AI recommendations
+def fetch_filtered_movies_with_ai(genre_ids=None, release_date_gte=None, release_date_lte=None, language=None):
+    """Enhanced filtered movies with AI recommendations"""
+    
+    # First try to get from API
+    api_movies = fetch_filtered_movies(genre_ids, release_date_gte, release_date_lte, language)
+    
+    # If we have genre filters, get smart recommendations from local dataset
+    if genre_ids:
+        local_recommendations = get_smart_genre_recommendations(genre_ids, 20)
+        
+        # Combine API and local recommendations, removing duplicates
+        combined_movies = api_movies.copy()
+        api_ids = {movie['id'] for movie in api_movies}
+        
+        for movie in local_recommendations:
+            if movie['id'] not in api_ids:
+                combined_movies.append(movie)
+        
+        return combined_movies[:40]
+    
+    return api_movies
 
 def load_navbar():
     st.markdown("""
@@ -546,7 +818,7 @@ def generate_carousel_html(movies, carousel_id, title):
 }}
 
 .movie-card:focus {{
-    outline: 2px solid #00d4ff;
+    outline: 2px solid #d8b4fe;
     outline-offset: 2px;
 }}
 
@@ -912,9 +1184,9 @@ def display_movie_filters():
                 st.error("Start date must be before end date!")
                 return
             
-            with st.spinner("🔍 Searching for movies..."):
-                # Fetch filtered movies
-                filtered_movies = fetch_filtered_movies(
+            with st.spinner("🔍 Searching for movies with AI recommendations..."):
+                # Fetch filtered movies with AI enhancement
+                filtered_movies = fetch_filtered_movies_with_ai(
                     genre_ids=genre_ids,
                     release_date_gte=release_date_gte,
                     release_date_lte=release_date_lte,
@@ -930,7 +1202,6 @@ def display_movie_filters():
             st.session_state.filter_applied = False
             st.rerun()
     
-    # st.markdown('</div>', unsafe_allow_html=True)
     
     # Display filtered results
     if st.session_state.filter_applied:
@@ -1047,7 +1318,6 @@ def display_movie_details(movie_id, source='dataset'):
                 st.markdown(f'<span class="genre-badge">{genre}</span>', unsafe_allow_html=True)
 
         # Overview
-        # st.markdown("---")
         st.subheader("📝 Overview")
         overview = movie.get("overview", "")
         if pd.notna(overview) and str(overview).strip():
@@ -1068,7 +1338,6 @@ def display_movie_details(movie_id, source='dataset'):
             st.write(", ".join(cast_names))
 
         # Additional Information
-        # st.markdown("---")
         st.subheader("📌 Additional Information")
         
         budget = movie.get("budget", 0)
@@ -1089,6 +1358,9 @@ def display_movie_details(movie_id, source='dataset'):
         if pd.notna(homepage) and homepage.strip():
             st.markdown(f"🔗 [Official Website]({homepage})")
 
+        st.markdown("---")
+        display_ai_recommendations(movie_id, source)
+
 # Main app
 def main():
     load_navbar()
@@ -1101,13 +1373,7 @@ def main():
     
     if movie_id:
         # Detail page
-        # if st.button("⬅ Back to Discovery"):
-        #     st.query_params.clear()
-        #     st.rerun()
-        
-        # st.markdown('<div class="detail-container">', unsafe_allow_html=True)
         display_movie_details(movie_id, source)
-        st.markdown('</div>', unsafe_allow_html=True)
     else:
         # Main discovery page
         # Load top rated movies from dataset
@@ -1198,5 +1464,39 @@ def main():
             else:
                 st.error("Unable to load now playing movies")
 
+            st.header("🤖 AI-Powered Recommendations")
+            
+            # Smart Recommendations based on trending patterns
+            with st.spinner("🧠 Generating smart recommendations..."):
+                ai_recommendations = get_hybrid_recommendations(num_recommendations=30)
+            
+            if ai_recommendations:
+                components.html(generate_carousel_html(ai_recommendations, "AIPersonalized", "AI Personalized"), height=480)
+
+            st.header("🔍 Find Similar Movies")
+            with st.expander("Discover movies similar to one you like"):
+                # Load movie titles for selection
+                df = load_data()
+                movie_options = df[['id', 'title']].dropna()
+                
+                selected_movie = st.selectbox(
+                    "Select a movie to find similar ones:",
+                    options=movie_options['id'].tolist(),
+                    format_func=lambda x: movie_options[movie_options['id'] == x]['title'].iloc[0] if len(movie_options[movie_options['id'] == x]) > 0 else "Unknown",
+                    index=None,
+                    placeholder="Choose a movie..."
+                )
+                
+                if selected_movie and st.button("🎬 Find Similar Movies"):
+                    with st.spinner("🤖 Finding similar movies..."):
+                        similar_movies = get_content_recommendations(selected_movie, num_recommendations=20)
+                        
+                    if similar_movies:
+                        selected_title = movie_options[movie_options['id'] == selected_movie]['title'].iloc[0]
+                        st.success(f"Found {len(similar_movies)} movies similar to '{selected_title}'")
+                        components.html(generate_carousel_html(similar_movies, "SimilarMovies", "Similar Movies"), height=480)
+                    else:
+                        st.warning("No similar movies found. Try selecting a different movie.")
+                
 if __name__ == "__main__":
     main()
