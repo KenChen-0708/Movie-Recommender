@@ -25,7 +25,7 @@
 1. Run the Streamlit app:
 
    ```bash
-   streamlit run app.py
+   streamlit run Homepage.py
    ```
 
    ```window
