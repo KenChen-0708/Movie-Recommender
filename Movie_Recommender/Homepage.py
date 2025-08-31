@@ -4,8 +4,13 @@ import streamlit.components.v1 as components
 import requests
 from datetime import datetime
 import ast
-from datetime import datetime
-
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+import numpy as np
+from collections import Counter
+import re
+from datetime import datetime, timedelta
+import ast
 
 # Page configuration
 st.set_page_config(
@@ -19,6 +24,56 @@ st.set_page_config(
 API_KEY = "6272a18b79461f7987d2f1047b3d1198"
 API_BASE_URL = "https://api.themoviedb.org/3"
 
+# Helper function to generate star display for MovieLens ratings (1-5 scale)
+def generate_star_rating(rating, max_rating=5):
+    """Generate star display for ratings. Returns HTML for stars including half stars."""
+    if pd.isna(rating) or rating == 0:
+        return "☆☆☆☆☆"
+    
+    # Ensure rating is within valid range
+    rating = max(0, min(rating, max_rating))
+    
+    full_stars = int(rating)
+    half_star = 1 if (rating - full_stars) >= 0.5 else 0
+    empty_stars = max_rating - full_stars - half_star
+    
+    stars_html = "★" * full_stars
+    if half_star:
+        stars_html += "⭐"  # Half star (can be replaced with a proper half-star icon)
+    stars_html += "☆" * empty_stars
+    
+    return stars_html
+
+def generate_star_rating_html(rating, max_rating=5):
+    """Generate HTML star display with proper styling"""
+    if pd.isna(rating) or rating == 0:
+        return '<span class="star-rating">☆☆☆☆☆</span>'
+    
+    rating = max(0, min(rating, max_rating))
+    full_stars = int(rating)
+    has_half = (rating - full_stars) >= 0.5
+    
+    html = '<span class="star-rating">'
+    
+    # Full stars
+    for i in range(full_stars):
+        html += '<span class="star full">★</span>'
+    
+    # Half star
+    if has_half:
+        html += '<span class="star half">⭐</span>'
+        empty_count = max_rating - full_stars - 1
+    else:
+        empty_count = max_rating - full_stars
+    
+    # Empty stars
+    for i in range(empty_count):
+        html += '<span class="star empty">☆</span>'
+    
+    html += f' <span class="rating-number">({rating:.1f}/5)</span></span>'
+    
+    return html
+
 # Load dataset for top rated movies
 @st.cache_data
 def load_data():
@@ -28,6 +83,242 @@ def load_data():
                    'poster_path', 'tagline', 'genres']
     
     return pd.read_csv("dataset/TMDB_movie_dataset_v11.csv", usecols=cols_needed, dtype={'id': str})
+
+# Load MovieLens datasets
+@st.cache_data
+def load_movielens_data():
+    """Load MovieLens datasets and merge them"""
+    try:
+        # Load ratings data
+        ratings_df = pd.read_csv("dataset/ml-latest-small/ratings.csv")
+        ratings_df['timestamp'] = pd.to_datetime(ratings_df['timestamp'], unit='s')
+        
+        # Load movies data
+        movies_df = pd.read_csv("dataset/ml-latest-small/movies.csv")
+        
+        # Load links data for TMDB IDs
+        links_df = pd.read_csv("dataset/ml-latest-small/links.csv")
+        
+        # Load tags data
+        tags_df = pd.read_csv("dataset/ml-latest-small/tags.csv")
+        tags_df['timestamp'] = pd.to_datetime(tags_df['timestamp'], unit='s')
+        
+        # Merge datasets
+        merged_df = movies_df.merge(links_df, on='movieId', how='left')
+        
+        # Extract year from title for movies without release dates
+        movies_df['year'] = movies_df['title'].str.extract(r'\((\d{4})\)')
+        
+        # Validate data
+        if ratings_df.empty or movies_df.empty or merged_df.empty:
+            st.warning("MovieLens dataset appears to be empty. Please check the data files.")
+            return None, None, None, None, None, None
+            
+        return ratings_df, movies_df, links_df, merged_df, tags_df, movies_df['year']
+    except FileNotFoundError as e:
+        st.error(f"❌ MovieLens dataset files not found: {e}")
+        st.info("Please ensure the ml-latest-small folder is in the dataset directory")
+        return None, None, None, None, None, None
+    except Exception as e:
+        st.error(f"❌ Error loading MovieLens data: {e}")
+        return None, None, None, None, None, None
+
+# New MovieLens-based recommendation functions
+@st.cache_data
+def get_trending_movies_movielens(ratings_df, merged_df, days):
+    """Get trending movies based on recent ratings activity"""
+    try:
+        if ratings_df is None or merged_df is None:
+            return []
+        
+        # Calculate cutoff date for recent activity
+        cutoff_date = datetime.now() - timedelta(days=days)
+        
+        # Filter recent ratings
+        recent_ratings = ratings_df[ratings_df['timestamp'] >= cutoff_date]
+        
+        if recent_ratings.empty:
+            # If no recent ratings, use all ratings from last 365 days
+            cutoff_date = datetime.now() - timedelta(days=365)
+            recent_ratings = ratings_df[ratings_df['timestamp'] >= cutoff_date]
+        
+        # Calculate average rating and count for recent ratings
+        trending_stats = recent_ratings.groupby('movieId').agg({
+            'rating': ['mean', 'count']
+        }).reset_index()
+        trending_stats.columns = ['movieId', 'avg_rating', 'recent_ratings']
+        
+        # Merge with movie info and links
+        trending_movies = trending_stats.merge(merged_df, on='movieId', how='left')
+        
+        # Sort by recent activity and get top 30
+        trending_movies = trending_movies.sort_values('recent_ratings', ascending=False).head(30)
+        
+        # Convert to API-like format
+        movies_list = []
+        for _, movie in trending_movies.iterrows():
+            tmdb_id = movie.get('tmdbId')
+            if pd.notna(tmdb_id) and tmdb_id > 0:
+                movies_list.append({
+                    'id': str(int(tmdb_id)),
+                    'title': movie.get('title', 'Unknown Title'),
+                    'vote_average': round(movie.get('avg_rating', 0), 1),  # MovieLens rating (1-5)
+                    'poster_url': None,  # Will be fetched from TMDB API
+                    'source': 'movielens',
+                    'movieId': movie.get('movieId'),
+                    'recent_ratings': movie.get('recent_ratings', 0),
+                    'movielens_rating': movie.get('avg_rating', 0)
+                })
+        
+        return movies_list
+    except Exception as e:
+        st.error(f"Error getting trending movies: {e}")
+        return []
+
+@st.cache_data
+def get_popular_movies_movielens(ratings_df, merged_df):
+    """Get popular movies based on total rating count"""
+    try:
+        if ratings_df is None or merged_df is None:
+            return []
+        
+        # Calculate average rating and total count per movie
+        popularity_stats = ratings_df.groupby('movieId').agg({
+            'rating': ['mean', 'count']
+        }).reset_index()
+        popularity_stats.columns = ['movieId', 'avg_rating', 'total_ratings']
+        
+        # Merge with movie info and links
+        popular_movies = popularity_stats.merge(merged_df, on='movieId', how='left')
+        
+        # Sort by total ratings and get top 30
+        popular_movies = popular_movies.sort_values('total_ratings', ascending=False).head(30)
+        
+        # Convert to API-like format
+        movies_list = []
+        for _, movie in popular_movies.iterrows():
+            tmdb_id = movie.get('tmdbId')
+            if pd.notna(tmdb_id) and tmdb_id > 0:
+                movies_list.append({
+                    'id': str(int(tmdb_id)),
+                    'title': movie.get('title', 'Unknown Title'),
+                    'vote_average': round(movie.get('avg_rating', 0), 1),  # MovieLens rating (1-5)
+                    'poster_url': None,  # Will be fetched from TMDB API
+                    'source': 'movielens',
+                    'movieId': movie.get('movieId'),
+                    'total_ratings': movie.get('total_ratings', 0),
+                    'movielens_rating': movie.get('avg_rating', 0)
+                })
+        
+        return movies_list
+    except Exception as e:
+        st.error(f"Error getting popular movies: {e}")
+        return []
+
+@st.cache_data
+def get_top_rated_movies_movielens(ratings_df, merged_df, min_ratings=20):
+    """Get top rated movies based on average rating with minimum rating threshold"""
+    try:
+        if ratings_df is None or merged_df is None:
+            return []
+        
+        # Calculate average rating and count per movie
+        rating_stats = ratings_df.groupby('movieId').agg({
+            'rating': ['mean', 'count']
+        }).reset_index()
+        rating_stats.columns = ['movieId', 'avg_rating', 'rating_count']
+        
+        # Filter by minimum rating count to avoid bias
+        qualified_movies = rating_stats[rating_stats['rating_count'] >= min_ratings]
+        
+        # Merge with movie info and links
+        top_rated_movies = qualified_movies.merge(merged_df, on='movieId', how='left')
+        
+        # Filter out movies without TMDB ID
+        top_rated_movies = top_rated_movies[
+            (top_rated_movies['tmdbId'].notna()) & 
+            (top_rated_movies['tmdbId'] > 0)
+        ]
+        
+        # Sort by average rating and get top 30
+        top_rated_movies = top_rated_movies.sort_values('avg_rating', ascending=False).head(30)
+        
+        # Convert to API-like format
+        movies_list = []
+        for _, movie in top_rated_movies.iterrows():
+            tmdb_id = movie.get('tmdbId')
+            movies_list.append({
+                'id': str(int(tmdb_id)),
+                'title': movie.get('title', 'Unknown Title'),
+                'vote_average': round(movie.get('avg_rating', 0), 1),  # MovieLens rating (1-5)
+                'poster_url': None,  # Will be fetched from TMDB API
+                'source': 'movielens',
+                'movieId': movie.get('movieId'),
+                'avg_rating': movie.get('avg_rating', 0),
+                'rating_count': movie.get('rating_count', 0),
+                'movielens_rating': movie.get('avg_rating', 0)
+            })
+        
+        return movies_list
+    except Exception as e:
+        st.error(f"Error getting top rated movies: {e}")
+        return []
+
+def fetch_movie_poster_and_details(tmdb_id):
+    """Fetch movie poster and basic details from TMDB API"""
+    try:
+        url = f"{API_BASE_URL}/movie/{tmdb_id}"
+        params = {
+            'api_key': API_KEY,
+            'language': 'en-US'
+        }
+        response = requests.get(url, params=params, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        
+        return {
+            'poster_url': f"https://image.tmdb.org/t/p/w300{data.get('poster_path', '')}" if data.get('poster_path') else None,
+            'tmdb_vote_average': data.get('vote_average', 0),  # TMDB rating (1-10)
+            'release_date': data.get('release_date', ''),
+            'overview': data.get('overview', '')
+        }
+    except Exception as e:
+        return {
+            'poster_url': None,
+            'tmdb_vote_average': 0,
+            'release_date': '',
+            'overview': ''
+        }
+
+def enhance_movielens_movies_with_tmdb(movies_list):
+    """Enhance MovieLens movies with TMDB data (poster, rating, etc.)"""
+    enhanced_movies = []
+    
+    for movie in movies_list:
+        if movie['source'] == 'movielens' and movie['poster_url'] is None:
+            # Fetch TMDB data for this movie
+            tmdb_data = fetch_movie_poster_and_details(movie['id'])
+            
+            # Update movie with TMDB data
+            movie['poster_url'] = tmdb_data['poster_url']
+            movie['tmdb_rating'] = tmdb_data['tmdb_vote_average']  # Store TMDB rating separately
+            
+            # Add fallback poster if TMDB doesn't have one
+            if not movie['poster_url']:
+                movie['poster_url'] = "https://via.placeholder.com/300x450?text=No+Poster"
+        
+        enhanced_movies.append(movie)
+    
+    return enhanced_movies
+
+# Modified fetch_filtered_movies function to include AI recommendations
+def fetch_filtered_movies_with_ai(genre_ids=None, release_date_gte=None, release_date_lte=None, language=None):
+    """Enhanced filtered movies with AI recommendations"""
+    
+    # First try to get from API
+    api_movies = fetch_filtered_movies(genre_ids, release_date_gte, release_date_lte, language)
+    
+    return api_movies
 
 def load_navbar():
     st.markdown("""
@@ -128,10 +419,6 @@ def load_navbar():
         </div>
     </div>
     """, unsafe_allow_html=True)
-
-
-
-
 
 # Helper function to safely parse JSON-like strings
 def safe_parse_json(json_str):
@@ -416,6 +703,34 @@ def load_custom_css():
             font-size: 1.1rem;
         }
         
+        /* Star rating styles */
+        .star-rating {
+            font-size: 1.2rem;
+            margin-bottom: 10px;
+        }
+        
+        .star-rating .star {
+            margin-right: 2px;
+        }
+        
+        .star-rating .star.full {
+            color: #ffc107;
+        }
+        
+        .star-rating .star.half {
+            color: #ffc107;
+        }
+        
+        .star-rating .star.empty {
+            color: #6c757d;
+        }
+        
+        .star-rating .rating-number {
+            margin-left: 8px;
+            font-size: 0.9rem;
+            color: #b0b0b0;
+        }
+        
         .filter-container {
             background: var(--card-bg);
             padding: 25px;
@@ -496,7 +811,7 @@ def load_custom_css():
         </style>
     """, unsafe_allow_html=True)
 
-# Generate carousel HTML with clickable cards using anchor tags
+# Generate carousel HTML with clickable cards using anchor tags and star ratings
 def generate_carousel_html(movies, carousel_id, title):
     poster_html = f"""
 <style>
@@ -546,7 +861,7 @@ def generate_carousel_html(movies, carousel_id, title):
 }}
 
 .movie-card:focus {{
-    outline: 2px solid #00d4ff;
+    outline: 2px solid #d8b4fe;
     outline-offset: 2px;
 }}
 
@@ -588,8 +903,25 @@ def generate_carousel_html(movies, carousel_id, title):
     color: #666;
 }}
 
-.rating-star {{
+.star-rating-carousel {{
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    font-size: 14px;
+}}
+
+.star-rating-carousel .star {{
     color: #ffc107;
+}}
+
+.star-rating-carousel .star.empty {{
+    color: #ddd;
+}}
+
+.star-rating-carousel .rating-text {{
+    margin-left: 5px;
+    font-size: 11px;
+    color: #666;
 }}
 
 .carousel-nav {{
@@ -683,13 +1015,24 @@ def generate_carousel_html(movies, carousel_id, title):
         <div class="carousel-track" id="carouselTrack{carousel_id}">
 """
 
-    # Add movie cards to HTML with anchor tags
+    # Add movie cards to HTML with anchor tags and proper star ratings
     for movie in movies:
         title = str(movie.get('title', 'Unknown Title'))[:50]
-        rating = round(float(movie.get('vote_average', 0)), 1)
+        rating = float(movie.get('vote_average', 0))
         poster_url = movie['poster_url']
         movie_id = movie.get('id', '')
         source = movie.get('source', 'dataset')
+        
+        # Generate star rating based on source
+        if source == 'movielens':
+            # MovieLens rating (1-5 scale)
+            star_display = generate_star_display_html(rating, max_rating=5)
+            rating_text = f"{rating:.1f}/5"
+        else:
+            # TMDB rating (1-10 scale, convert to 5-star display)
+            converted_rating = rating / 2  # Convert 10-point to 5-point scale
+            star_display = generate_star_display_html(converted_rating, max_rating=5)
+            rating_text = f"{rating:.1f}/10"
         
         # Create the URL with proper parameters
         detail_url = f"?movie_id={movie_id}&source={source}"
@@ -700,8 +1043,10 @@ def generate_carousel_html(movies, carousel_id, title):
                 <div class="movie-info">
                     <h3 class="movie-title">{title}</h3>
                     <div class="movie-rating">
-                        <span class="rating-star">★</span>
-                        <span>{rating}/10</span>
+                        <div class="star-rating-carousel">
+                            {star_display}
+                            <span class="rating-text">{rating_text}</span>
+                        </div>
                     </div>
                 </div>
             </a>
@@ -828,8 +1173,35 @@ document.querySelectorAll('#carouselTrack{carousel_id} .movie-card').forEach(car
     
     return poster_html
 
+def generate_star_display_html(rating, max_rating=5):
+    """Generate HTML for star display in carousel"""
+    if pd.isna(rating) or rating == 0:
+        return ''.join(['<span class="star empty">☆</span>' for _ in range(max_rating)])
+    
+    rating = max(0, min(rating, max_rating))
+    full_stars = int(rating)
+    has_half = (rating - full_stars) >= 0.5
+    
+    html = ''
+    
+    # Full stars
+    for i in range(full_stars):
+        html += '<span class="star">★</span>'
+    
+    # Half star
+    if has_half:
+        html += '<span class="star">⭐</span>'
+        empty_count = max_rating - full_stars - 1
+    else:
+        empty_count = max_rating - full_stars
+    
+    # Empty stars
+    for i in range(empty_count):
+        html += '<span class="star empty">☆</span>'
+    
+    return html
+
 def display_movie_filters():
-    # st.markdown('<div class="filter-container">', unsafe_allow_html=True)
     st.subheader("🎯 Filter Movies")
     
     # Initialize session state for filters
@@ -912,9 +1284,9 @@ def display_movie_filters():
                 st.error("Start date must be before end date!")
                 return
             
-            with st.spinner("🔍 Searching for movies..."):
-                # Fetch filtered movies
-                filtered_movies = fetch_filtered_movies(
+            with st.spinner("🔍 Searching for movies with AI recommendations..."):
+                # Fetch filtered movies with AI enhancement
+                filtered_movies = fetch_filtered_movies_with_ai(
                     genre_ids=genre_ids,
                     release_date_gte=release_date_gte,
                     release_date_lte=release_date_lte,
@@ -930,7 +1302,6 @@ def display_movie_filters():
             st.session_state.filter_applied = False
             st.rerun()
     
-    # st.markdown('</div>', unsafe_allow_html=True)
     
     # Display filtered results
     if st.session_state.filter_applied:
@@ -1047,7 +1418,6 @@ def display_movie_details(movie_id, source='dataset'):
                 st.markdown(f'<span class="genre-badge">{genre}</span>', unsafe_allow_html=True)
 
         # Overview
-        # st.markdown("---")
         st.subheader("📝 Overview")
         overview = movie.get("overview", "")
         if pd.notna(overview) and str(overview).strip():
@@ -1068,7 +1438,6 @@ def display_movie_details(movie_id, source='dataset'):
             st.write(", ".join(cast_names))
 
         # Additional Information
-        # st.markdown("---")
         st.subheader("📌 Additional Information")
         
         budget = movie.get("budget", 0)
@@ -1092,75 +1461,37 @@ def display_movie_details(movie_id, source='dataset'):
 # Main app
 def main():
     load_navbar()
-
     load_custom_css()
-    
+        
+    trending_day = 3000
+
     # Check for movie_id in query params for detail view
     movie_id = st.query_params.get("movie_id")
     source = st.query_params.get("source", "dataset")
     
     if movie_id:
         # Detail page
-        # if st.button("⬅ Back to Discovery"):
-        #     st.query_params.clear()
-        #     st.rerun()
-        
-        # st.markdown('<div class="detail-container">', unsafe_allow_html=True)
         display_movie_details(movie_id, source)
-        st.markdown('</div>', unsafe_allow_html=True)
     else:
-        # Main discovery page
-        # Load top rated movies from dataset
-        df = load_data()
-        df = df[df["adult"] != True]
-        
-        # Calculate top rated movies
-        C = df["vote_average"].mean()
-        m = df["vote_count"].quantile(0.95)
-        qualified = df[df["vote_count"] >= m].copy()
-        
-        def weighted_rating(x, m=m, C=C):
-            v = x["vote_count"]
-            R = x["vote_average"]
-            return (v / (v + m) * R) + (m / (v + m) * C)
-        
-        qualified["score"] = qualified.apply(weighted_rating, axis=1)
-        top_rated = qualified.sort_values("score", ascending=False)
-        top_rated = top_rated.dropna(subset=["poster_path"]).head(30)
-        
-        # Convert to same format as API data
-        top_rated_movies = []
-        for _, movie in top_rated.iterrows():
-            top_rated_movies.append({
-                'id': str(movie.get('id')),
-                'title': movie.get('title', 'Unknown Title'),
-                'vote_average': movie.get('vote_average', 0),
-                'poster_url': f"https://image.tmdb.org/t/p/w300{movie['poster_path']}",
-                'source': 'dataset'
-            })
-        
+        # Load MovieLens data once and pass to all functions
+        with st.spinner("🎬 Loading MovieLens data..."):
+            ratings_df, movies_df, links_df, merged_df, tags_df, movies_year = load_movielens_data()
+            
+            if ratings_df is None:
+                st.error("Failed to load MovieLens data. Please check if the dataset files are available.")
+                return
 
-        # Popular movies
-        popular_movies = (
-            df.dropna(subset=["poster_path"])
-            .sort_values("popularity", ascending=False)
-            .head(30)
-        )
+            # Get all recommendations using the loaded data
+            trending_movies = get_trending_movies_movielens(ratings_df, merged_df, days=trending_day)
+            popular_movies = get_popular_movies_movielens(ratings_df, merged_df)
+            top_rated_movies = get_top_rated_movies_movielens(ratings_df, merged_df, min_ratings=50)
+            
+            # Enhance MovieLens movies with TMDB data (posters, ratings)
+            trending_movies = enhance_movielens_movies_with_tmdb(trending_movies)
+            popular_movies = enhance_movielens_movies_with_tmdb(popular_movies)
+            top_rated_movies = enhance_movielens_movies_with_tmdb(top_rated_movies)
 
-        # Convert to API-like format
-        popular_movies_list = []
-        for _, movie in popular_movies.iterrows():
-            popular_movies_list.append({
-                'id': str(movie.get('id')),
-                'title': movie.get('title', 'Unknown Title'),
-                'vote_average': movie.get('vote_average', 0),
-                'poster_url': f"https://image.tmdb.org/t/p/w300{movie['poster_path']}",
-                'source': 'dataset'
-            })
-
-        # Fetch API data
-        trending_movies = fetch_trending_movies()
-        now_playing_movies = fetch_now_playing_movies()
+            st.success(f"✅ Loaded MovieLens data: {len(ratings_df)} ratings, {len(movies_df)} movies")
         
         # Display sections
         st.title("🎬 Movie Discovery")
@@ -1168,35 +1499,31 @@ def main():
         # Add the filtering UI
         display_movie_filters()
         
-        # Only show the original carousels if no filter is applied
+         # Only show the original carousels if no filter is applied
         if not st.session_state.get('filter_applied', False):
-            # Trending Movies
+            # Trending Movies (based on recent rating activity)
             st.header("🔥 Trending Movies")
+            st.caption(f"Based on recent rating activity in the last {trending_day} days")
             if trending_movies:
                 components.html(generate_carousel_html(trending_movies, "Trending", "Trending Movies"), height=480)
             else:
-                st.error("Unable to load trending movies")
+                st.info("No trending movies data available. This may be due to limited recent rating activity.")
 
-            # Top Rated Movies
+            # Top Rated Movies (based on MovieLens ratings)
             st.header("🏆 Top Rated Movies")
+            st.caption("Based on average ratings from MovieLens users (minimum 50 ratings)")
             if top_rated_movies:
                 components.html(generate_carousel_html(top_rated_movies, "TopRated", "Top Rated Movies"), height=480)
             else:
-                st.error("Unable to load top rated movies")
+                st.info("No top rated movies data available.")
             
-            # Popular Movies
+            # Popular Movies (based on total rating count)
             st.header("🌟 Popular Movies")
-            if popular_movies_list:
-                components.html(generate_carousel_html(popular_movies_list, "Popular", "Popular Movies"), height=480)
+            st.caption("Based on total number of ratings from MovieLens users")
+            if popular_movies:
+                components.html(generate_carousel_html(popular_movies, "Popular", "Popular Movies"), height=480)
             else:
-                st.error("Unable to load popular movies")
-
-            # Now Playing Movies
-            st.header("🎭 Now Playing")
-            if now_playing_movies:
-                components.html(generate_carousel_html(now_playing_movies, "NowPlaying", "Now Playing Movies"), height=480)
-            else:
-                st.error("Unable to load now playing movies")
-
+                st.info("No popular movies data available.")
+                
 if __name__ == "__main__":
     main()
