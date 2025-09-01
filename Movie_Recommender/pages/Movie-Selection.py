@@ -106,26 +106,34 @@ def load_navbar():
     </div>
     """, unsafe_allow_html=True)
 
-# Load the CSV data
+# Load movies data
 @st.cache_data
 def load_movie_data():
     try:
-        df = pd.read_csv("dataset/TMDB_movie_dataset_v11.csv")
-
-        # Convert 'adult' column to Boolean
-        df['adult'] = df['adult'].astype(str).str.lower() == 'true'
-
-        # Filter out adult movies
-        df = df[df['adult'] == False]
-
+        df = pd.read_csv("dataset/ml-latest-small/movies.csv")
+        
+        # Optional: extract year from title (e.g., "Toy Story (1995)")
+        df['year'] = df['title'].str.extract(r'\((\d{4})\)')
         return df
-
     except FileNotFoundError:
-        st.error("CSV file not found. Please ensure 'dataset/TMDB_movie_dataset_v11.csv' exists.")
+        st.error("❌ movies.csv not found. Please check the dataset path.")
         return pd.DataFrame()
-    except Exception as e:
-        st.error(f"An error occurred while loading the data: {e}")
-        return pd.DataFrame()
+
+# Load ratings and links
+@st.cache_data
+def load_ratings_links():
+    try:
+        ratings = pd.read_csv("dataset/ml-latest-small/ratings.csv")
+        links   = pd.read_csv("dataset/ml-latest-small/links.csv")
+        return ratings, links
+    except FileNotFoundError as e:
+        st.error(f"❌ File not found: {e}")
+        return pd.DataFrame(), pd.DataFrame()
+
+# Use them
+movies_df = load_movie_data()
+ratings_df, links_df = load_ratings_links()
+
 
 # Helper function to safely parse JSON-like strings
 def safe_parse_json(json_str):
@@ -539,11 +547,16 @@ detail_id = raw_param if isinstance(raw_param, str) else raw_param[0] if raw_par
 if detail_id is not None:
     # Add navigation bar to detail page too
     load_navbar()
-    
+
+    # Use the already-loaded `df`; don't call load_data()/load_movie_data() again
     try:
-        detail_id = int(detail_id)
-        movie_detail = df[df['id'] == detail_id]
-        
+        # Normalize the id types so comparison works regardless of CSV typing
+        detail_id_int = int(str(detail_id).strip())
+
+        # Some datasets store id as str, others as int; handle both safely
+        ids_as_int = pd.to_numeric(df['id'], errors='coerce')
+        movie_detail = df.loc[ids_as_int == detail_id_int]
+
         if not movie_detail.empty:
             movie = movie_detail.iloc[0]
 
@@ -554,75 +567,95 @@ if detail_id is not None:
             col1, col2 = st.columns([1, 2])
             with col1:
                 poster_path = movie.get("poster_path", None)
-                if pd.notna(poster_path) and poster_path:
-                    st.image(f"https://image.tmdb.org/t/p/w400{poster_path}", caption=movie.get("title", "No Title"), use_column_width=True)
+                if pd.notna(poster_path) and str(poster_path).strip():
+                    st.image(
+                        f"https://image.tmdb.org/t/p/w400{poster_path}",
+                        caption=movie.get("title", "No Title"),
+                        use_column_width=True
+                    )
                 else:
-                    st.image("https://via.placeholder.com/500x750?text=No+Poster", caption=movie.get("title", "No Title"), use_column_width=True)
+                    st.image(
+                        "https://via.placeholder.com/500x750?text=No+Poster",
+                        caption=movie.get("title", "No Title"),
+                        use_column_width=True
+                    )
 
             with col2:
                 st.title(movie.get("title", "No Title"))
+
                 tagline = movie.get("tagline", "")
                 if pd.notna(tagline) and str(tagline).strip():
                     st.markdown(f"<div class='tagline'>*{tagline}*</div>", unsafe_allow_html=True)
-                
+
                 release = movie.get("release_date", "")
                 runtime = movie.get("runtime", "?")
-                if pd.notna(release):
+                if pd.notna(release) and str(release).strip():
                     try:
                         release = datetime.strptime(str(release), "%Y-%m-%d").strftime("%B %d, %Y")
-                    except:
+                    except Exception:
+                        # keep original if parsing fails
                         pass
-                st.caption(f"📅 {release} • ⏱️ {runtime} min")
-                
+                st.caption(f"📅 {release or 'N/A'} • ⏱️ {runtime if pd.notna(runtime) else 'N/A'} min")
+
                 rating = movie.get("vote_average", None)
                 if pd.notna(rating):
                     st.markdown(f"**⭐ Rating:** {rating}/10")
-                
+
+                # Genres
                 genres = safe_parse_json(movie.get("genres", ""))
                 if genres:
                     genre_names = extract_names(genres)
-                    st.markdown("**🎞️ Genres:** " + " ".join([f"<span class='genre-badge'>{g}</span>" for g in genre_names]), unsafe_allow_html=True)
+                    if genre_names:
+                        st.markdown(
+                            "**🎞️ Genres:** " + " ".join(
+                                [f"<span class='genre-badge'>{g}</span>" for g in genre_names]
+                            ),
+                            unsafe_allow_html=True
+                        )
 
+                # Overview
                 st.subheader("📝 Overview")
                 overview = str(movie.get("overview", "")).strip()
-                if overview:
-                    st.write(overview)
-                else:
-                    st.write("No description available.")
+                st.write(overview if overview else "No description available.")
 
+                # Cast (if present in CSV)
                 cast_data = safe_parse_json(movie.get("cast", ""))
-                if cast_data:
-                    cast_names = extract_names(cast_data[:8])
-                    if cast_names:
-                        st.subheader("👤 Top Cast")
-                        st.markdown(", ".join(cast_names))
+                cast_names = extract_names(cast_data[:8]) if cast_data else []
+                if cast_names:
+                    st.subheader("👤 Top Cast")
+                    st.markdown(", ".join(cast_names))
 
+                # Extras
                 st.subheader("📌 Additional Information")
                 budget = movie.get("budget", 0)
                 revenue = movie.get("revenue", 0)
                 lang = movie.get("original_language", "")
                 status = movie.get("status", "")
-                if pd.notna(budget) and budget > 0:
+                if pd.notna(budget) and str(budget).isdigit() and int(budget) > 0:
                     st.write(f"**Budget:** ${int(budget):,}")
-                if pd.notna(revenue) and revenue > 0:
+                if pd.notna(revenue) and str(revenue).isdigit() and int(revenue) > 0:
                     st.write(f"**Revenue:** ${int(revenue):,}")
-                if pd.notna(lang):
-                    st.write(f"**Original Language:** {lang.upper()}")
-                if pd.notna(status):
+                if pd.notna(lang) and str(lang).strip():
+                    st.write(f"**Original Language:** {str(lang).upper()}")
+                if pd.notna(status) and str(status).strip():
                     st.write(f"**Status:** {status}")
+
                 homepage = movie.get("homepage", "")
-                if pd.notna(homepage) and homepage.strip():
+                if pd.notna(homepage) and str(homepage).strip():
                     st.markdown(f"🔗 [Official Site]({homepage})")
+
         else:
             st.error("Movie details not found.")
             if st.button("⬅ Back to Search", key="back_button_error"):
                 st.query_params.clear()
                 st.rerun()
+
     except ValueError:
         st.error("Invalid movie ID")
         if st.button("⬅ Back to Search", key="back_button_invalid"):
             st.query_params.clear()
             st.rerun()
+
 
 # ---------------- Search Page ---------------- #
 else:

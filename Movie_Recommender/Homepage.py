@@ -74,16 +74,6 @@ def generate_star_rating_html(rating, max_rating=5):
     
     return html
 
-# Load dataset for top rated movies
-@st.cache_data
-def load_data():
-    # Specify the columns to load for efficiency
-    cols_needed = ['id', 'title', 'vote_average', 'vote_count', 'release_date', 'runtime', 
-                   'adult', 'homepage', 'original_language', 'overview', 'popularity', 
-                   'poster_path', 'tagline', 'genres']
-    
-    return pd.read_csv("dataset/TMDB_movie_dataset_v11.csv", usecols=cols_needed, dtype={'id': str})
-
 # Load MovieLens datasets
 @st.cache_data
 def load_movielens_data():
@@ -1035,7 +1025,7 @@ def generate_carousel_html(movies, carousel_id, title):
             rating_text = f"{rating:.1f}/10"
         
         # Create the URL with proper parameters
-        detail_url = f"?movie_id={movie_id}&source={source}"
+        detail_url = f"/Movie_Details?movie_id={movie_id}&source={source}"
         
         poster_html += f"""
             <a href="{detail_url}" class="movie-card" target="_blank">
@@ -1325,138 +1315,124 @@ def display_movie_filters():
         st.markdown('</div>', unsafe_allow_html=True)
 
 # Movie detail page display
-def display_movie_details(movie_id, source='dataset'):
-    if source == 'api':
-        # Fetch from API
-        movie_data = fetch_movie_details_by_tmdb_id(movie_id)
-        if not movie_data:
-            st.error("Movie details not found.")
-            return
-        
-        # Convert API data to match dataset format
-        movie = {
-            'id': str(movie_data.get('id')),
-            'title': movie_data.get('title', 'No Title'),
-            'original_title': movie_data.get('original_title', ''),
-            'overview': movie_data.get('overview', ''),
-            'tagline': movie_data.get('tagline', ''),
-            'release_date': movie_data.get('release_date', ''),
-            'runtime': movie_data.get('runtime', 0),
-            'vote_average': movie_data.get('vote_average', 0),
-            'budget': movie_data.get('budget', 0),
-            'revenue': movie_data.get('revenue', 0),
-            'original_language': movie_data.get('original_language', ''),
-            'status': movie_data.get('status', ''),
-            'homepage': movie_data.get('homepage', ''),
-            'poster_path': movie_data.get('poster_path', ''),
-            'genres': movie_data.get('genres', []),
-            'cast': movie_data.get('credits', {}).get('cast', [])[:8] if movie_data.get('credits') else []
-        }
-    else:
-        # Fetch from dataset
-        df = load_data()
-        movie_detail = df[df['id'] == movie_id]
-        if movie_detail.empty:
-            st.error("Movie details not found.")
-            return
-        movie = movie_detail.iloc[0]
+def display_movie_details(movie_id, source='movielens'):
+    """
+    movie_id is a TMDB id (string or int) when source is 'api' or 'movielens'.
+    We fetch from TMDB and render a unified detail page.
+    """
+    # Normalize
+    try:
+        tmdb_id = int(str(movie_id))
+    except:
+        st.error("Invalid movie id.")
+        return
 
-    # Display movie details
+    # Always fetch from TMDB for api/movielens
+    movie_data = fetch_movie_details_by_tmdb_id(tmdb_id)
+    if not movie_data:
+        st.error("Movie details not found.")
+        return
+
+    # Unified structure
+    movie = {
+        'id': str(movie_data.get('id')),
+        'title': movie_data.get('title', 'No Title'),
+        'original_title': movie_data.get('original_title', ''),
+        'overview': movie_data.get('overview', ''),
+        'tagline': movie_data.get('tagline', ''),
+        'release_date': movie_data.get('release_date', ''),
+        'runtime': movie_data.get('runtime', 0),
+        'vote_average': movie_data.get('vote_average', 0),
+        'budget': movie_data.get('budget', 0),
+        'revenue': movie_data.get('revenue', 0),
+        'original_language': movie_data.get('original_language', ''),
+        'status': movie_data.get('status', ''),
+        'homepage': movie_data.get('homepage', ''),
+        'poster_path': movie_data.get('poster_path', ''),
+        'genres': movie_data.get('genres', []),
+        'cast': (movie_data.get('credits', {}) or {}).get('cast', [])[:8]
+    }
+
+    # --- UI ---
     col1, col2 = st.columns([1, 2])
 
     with col1:
-        poster_path = movie.get("poster_path", None)
-        if pd.notna(poster_path) and poster_path:
-            if source == 'api':
-                poster_url = f"https://image.tmdb.org/t/p/w400{poster_path}"
-            else:
-                poster_url = f"https://image.tmdb.org/t/p/w400{poster_path}"
-            st.image(poster_url, caption=movie.get("title", "No Title"), use_container_width=True)
+        poster_path = movie.get("poster_path") or ""
+        if poster_path:
+            st.image(f"https://image.tmdb.org/t/p/w400{poster_path}",
+                     caption=movie.get("title", "No Title"),
+                     use_column_width=True)
         else:
-            st.image("https://via.placeholder.com/400x600?text=No+Poster", 
-                    caption=movie.get("title", "No Title"), use_container_width=True)
+            st.image("https://via.placeholder.com/400x600?text=No+Poster",
+                     caption=movie.get("title", "No Title"),
+                     use_column_width=True)
 
     with col2:
         st.title(movie.get("title", "No Title"))
-        
+
         tagline = movie.get("tagline", "")
-        if pd.notna(tagline) and str(tagline).strip():
+        if isinstance(tagline, str) and tagline.strip():
             st.markdown(f'<div class="tagline">"{tagline}"</div>', unsafe_allow_html=True)
 
-        # Movie metadata
-        release = movie.get("release_date", "")
-        runtime = movie.get("runtime", "")
-        if pd.notna(release) and release:
-            try:
-                if isinstance(release, str):
-                    release = datetime.strptime(release, "%Y-%m-%d").strftime("%B %d, %Y")
-            except:
-                pass
-        
-        col_meta1, col_meta2 = st.columns(2)
-        with col_meta1:
-            st.write(f"**📅 Release Date:** {release if release else 'N/A'}")
-        with col_meta2:
+        # Metadata
+        release = movie.get("release_date") or ""
+        runtime = movie.get("runtime") or 0
+        try:
+            if release:
+                release_fmt = datetime.strptime(release, "%Y-%m-%d").strftime("%B %d, %Y")
+            else:
+                release_fmt = "N/A"
+        except:
+            release_fmt = release
+
+        meta1, meta2 = st.columns(2)
+        with meta1:
+            st.write(f"**📅 Release Date:** {release_fmt}")
+        with meta2:
             st.write(f"**⏱️ Runtime:** {runtime} min" if runtime else "**⏱️ Runtime:** N/A")
 
-        # Rating
-        rating = movie.get("vote_average", None)
-        if pd.notna(rating) and rating:
+        rating = movie.get("vote_average")
+        if rating:
             st.markdown(f'<div class="rating-display">⭐ {rating}/10</div>', unsafe_allow_html=True)
 
         # Genres
-        if source == 'api':
-            genres = movie.get("genres", [])
-            genre_names = [genre.get('name', '') for genre in genres] if genres else []
-        else:
-            genres = safe_parse_json(movie.get("genres", ""))
-            genre_names = extract_names(genres)
-        
-        if genre_names:
+        genres = movie.get("genres") or []
+        names = [g.get("name","") for g in genres if isinstance(g, dict)]
+        if names:
             st.markdown("**🎞️ Genres:**")
-            for genre in genre_names:
-                st.markdown(f'<span class="genre-badge">{genre}</span>', unsafe_allow_html=True)
+            for g in names:
+                st.markdown(f'<span class="genre-badge">{g}</span>', unsafe_allow_html=True)
 
         # Overview
         st.subheader("📝 Overview")
-        overview = movie.get("overview", "")
-        if pd.notna(overview) and str(overview).strip():
-            st.write(overview)
-        else:
-            st.write("No description available.")
+        overview = movie.get("overview") or ""
+        st.write(overview if overview.strip() else "No description available.")
 
         # Cast
-        if source == 'api':
-            cast_data = movie.get("cast", [])
-            cast_names = [actor.get('name', '') for actor in cast_data] if cast_data else []
-        else:
-            cast_data = safe_parse_json(movie.get("cast", ""))
-            cast_names = extract_names(cast_data)
-        
+        cast = movie.get("cast") or []
+        cast_names = [c.get("name","") for c in cast if isinstance(c, dict)]
         if cast_names:
             st.subheader("👤 Top Cast")
             st.write(", ".join(cast_names))
 
-        # Additional Information
+        # Additional info
         st.subheader("📌 Additional Information")
-        
-        budget = movie.get("budget", 0)
-        revenue = movie.get("revenue", 0)
-        lang = movie.get("original_language", "")
-        status = movie.get("status", "")
-
-        if pd.notna(budget) and budget and int(budget) > 0:
+        budget = movie.get("budget") or 0
+        revenue = movie.get("revenue") or 0
+        lang = movie.get("original_language") or ""
+        status = movie.get("status") or ""
+        if budget > 0:
             st.write(f"**Budget:** ${int(budget):,}")
-        if pd.notna(revenue) and revenue and int(revenue) > 0:
+        if revenue > 0:
             st.write(f"**Revenue:** ${int(revenue):,}")
-        if pd.notna(lang) and lang:
+        if lang:
             st.write(f"**Original Language:** {lang.upper()}")
-        if pd.notna(status) and status:
+        if status:
             st.write(f"**Status:** {status}")
-
-        homepage = movie.get("homepage", "")
-        if pd.notna(homepage) and homepage.strip():
+        homepage = movie.get("homepage") or ""
+        if homepage.strip():
             st.markdown(f"🔗 [Official Website]({homepage})")
+
 
 # Main app
 def main():
@@ -1466,11 +1442,17 @@ def main():
     trending_day = 3000
 
     # Check for movie_id in query params for detail view
-    movie_id = st.query_params.get("movie_id")
-    source = st.query_params.get("source", "dataset")
+    qp = st.query_params
+
+    movie_id = qp.get("movie_id")
+    if isinstance(movie_id, list):
+        movie_id = movie_id[0]
+
+    source = qp.get("source", "movielens")
+    if isinstance(source, list):
+        source = source[0]
     
     if movie_id:
-        # Detail page
         display_movie_details(movie_id, source)
     else:
         # Load MovieLens data once and pass to all functions
