@@ -1043,7 +1043,15 @@ def generate_carousel_html(movies, carousel_id, title):
             rating_text = f"{rating:.1f}/10"
         
         # Create the URL with proper parameters
-        detail_url = f"/Movie_Details?movie_id={movie_id}&source={source}"
+        # For MovieLens-sourced items, pass MovieLens movieId; for API items, pass TMDB id
+        if source == 'movielens' and movie.get('movieId') is not None:
+            movie_id_for_url = movie.get('movieId')
+            detail_source = 'movielens'
+        else:
+            movie_id_for_url = movie_id
+            detail_source = 'api'
+
+        detail_url = f"/Movie_Details?movie_id={movie_id_for_url}&source={detail_source}"
         
         poster_html += f"""
             <a href="{detail_url}" class="movie-card" target="_blank">

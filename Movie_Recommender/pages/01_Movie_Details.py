@@ -258,12 +258,6 @@ def generate_star_display_html(rating, max_rating=5):
     return html
 
 # Content-Based Filtering Functions
-import pandas as pd
-import numpy as np
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
-from sklearn.preprocessing import MultiLabelBinarizer
-import streamlit as st
 
 @st.cache_data
 def build_content_features(movies: pd.DataFrame, links: pd.DataFrame):
@@ -522,7 +516,7 @@ def render_hybrid_section_horizontal(target_tmdb_id: int):
         metrics_html = f'<div style="font-size:.75rem;color:#aaa;margin-top:4px;">' + "<br>".join(score_lines) + "</div>"
 
         cards_html.append(
-            f'<a href="/Movie_Details?movie_id={tmdb_id}&source=movielens" '
+            f'<a href="/Movie_Details?movie_id={int(row.get("movieId", 0))}&source=movielens" '
             f'style="text-decoration:none;color:inherit;" class="rec-link">'
             f'<div class="rec-card">'
             f'{poster_html}'
@@ -599,7 +593,7 @@ def render_cf_section_horizontal(target_tmdb_id: int):
         ) if pd.notna(sim) else f'<div style="font-size:.75rem;color:#aaa;margin-top:4px;">⭐ {ml_text}</div>'
 
         cards_html.append(
-            f'<a href="/Movie_Details?movie_id={tmdb_id}&source=movielens" '
+            f'<a href="/Movie_Details?movie_id={int(row.get("movieId", 0))}&source=movielens" '
             f'style="text-decoration:none;color:inherit;" class="rec-link">'
             f'<div class="rec-card">'
             f'{poster_html}'
@@ -773,7 +767,7 @@ def render_content_based_recommendations(detail_id_int, movies_df, vectorizer, t
                 if valid_genres:
                     genre_display = f'<div style="font-size: 0.7rem; color: #888; margin-top: 2px;">{" • ".join(valid_genres)}</div>'
 
-            rec_cards_html += f'<a href="?movie_id={rec_id}" style="text-decoration:none; color:inherit;" class="rec-link"><div class="rec-card">{poster_html}<div class="rec-title">{display_title}</div><div class="rec-year">{int(rec_year) if pd.notna(rec_year) else ""}</div>{genre_display}</div></a>'
+            rec_cards_html += f'<a href="/Movie_Details?movie_id={rec_id}&source=movielens" style="text-decoration:none; color:inherit;" class="rec-link"><div class="rec-card">{poster_html}<div class="rec-title">{display_title}</div><div class="rec-year">{int(rec_year) if pd.notna(rec_year) else ""}</div>{genre_display}</div></a>'
         
         rec_cards_html += '</div>'
         
@@ -1000,37 +994,62 @@ if not movie_id:
     st.error("No movie_id provided.")
     st.stop()
 
-# Handle different data sources
+# Map between MovieLens movieId and TMDB tmdbId based on source
+ratings_small, movies_small, links_small = load_ml_small()
+
+movie = None
+ml_movie_id = None
+tmdb_id = None
+
 try:
-    detail_id_int = int(str(movie_id).strip())
-    
-    # Look up in MovieLens data first
-    movie_detail = movies_df[movies_df['movieId'] == detail_id_int] if not movies_df.empty else pd.DataFrame()
-    
-    if movie_detail.empty:
-        st.error("Movie details not found.")
-        st.stop()
-        
-    movie = movie_detail.iloc[0]
+    incoming_id = int(str(movie_id).strip())
 except ValueError:
     st.error("Invalid movie ID")
     st.stop()
 
-# Extract MovieLens movie info
-movie_title = movie.get("clean_title", movie.get("title", ""))
-movie_year = movie.get("year")
-avg_rating = movie.get("avg_rating", 0)
-rating_count = movie.get("rating_count", 0)
+if str(source).lower() == "api":
+    # Treat incoming id as TMDB id
+    tmdb_id = incoming_id
+    # Try to find corresponding MovieLens movieId for ratings and content-based sections
+    if not links_small.empty:
+        row_map = links_small.loc[links_small["tmdbId"] == tmdb_id]
+        if not row_map.empty:
+            ml_movie_id = int(row_map.iloc[0]["movieId"])
+            if not movies_df.empty:
+                movie_rows = movies_df.loc[movies_df["movieId"] == ml_movie_id]
+                if not movie_rows.empty:
+                    movie = movie_rows.iloc[0]
+else:
+    # Treat incoming id as MovieLens movieId
+    ml_movie_id = incoming_id
+    if not movies_df.empty:
+        movie_rows = movies_df.loc[movies_df["movieId"] == ml_movie_id]
+        if not movie_rows.empty:
+            movie = movie_rows.iloc[0]
+    if not links_small.empty:
+        row_map = links_small.loc[links_small["movieId"] == ml_movie_id]
+        if not row_map.empty:
+            tmdb_id = int(row_map.iloc[0]["tmdbId"]) if not pd.isna(row_map.iloc[0]["tmdbId"]) else None
 
-# Try to get enhanced movie details from TMDB
+# If we still have no movie detail, continue with TMDB-only rendering; else use MovieLens info too
+movie_title = movie.get("clean_title", movie.get("title", "")) if movie is not None else None
+movie_year = movie.get("year") if movie is not None else None
+avg_rating = movie.get("avg_rating", 0) if movie is not None else 0
+rating_count = movie.get("rating_count", 0) if movie is not None else 0
+
+# Fetch TMDB details using tmdb_id if available; otherwise fall back to search by title
 tmdb_data = None
-if movie_title:
-    tmdb_data = search_tmdb_by_title(movie_title, movie_year)
-    if tmdb_data:
-        # Get full details from TMDB
-        tmdb_id = tmdb_data.get('id')
+if tmdb_id:
+    tmdb_data = fetch_movie_details_by_tmdb_id(tmdb_id)
+elif movie_title:
+    tmdb_result = search_tmdb_by_title(movie_title, movie_year)
+    if tmdb_result:
+        tmdb_id = tmdb_result.get("id")
         if tmdb_id:
             tmdb_data = fetch_movie_details_by_tmdb_id(tmdb_id)
+
+# Define detail_id_int for content-based section (uses MovieLens movieId)
+detail_id_int = ml_movie_id if ml_movie_id is not None else None
 
 # ----- Movie Details Display -----
 col1, col2 = st.columns([1, 2])
@@ -1061,7 +1080,8 @@ with col1:
 
 with col2:
     # Title
-    title_display = movie_title or "No Title"
+    # Prefer TMDB title if available; fall back to MovieLens title
+    title_display = (tmdb_data.get("title") if tmdb_data and tmdb_data.get("title") else movie_title) or "No Title"
     st.title(title_display)
     
     # Tagline (if available from TMDB)
@@ -1071,16 +1091,18 @@ with col2:
             st.markdown(f'<div class="tagline">"{tagline}"</div>', unsafe_allow_html=True)
 
     # Release date and runtime
-    year = movie.get("year", "")
-    if pd.notna(year):
-        try:
-            if tmdb_data and tmdb_data.get("release_date"):
-                release_fmt = datetime.strptime(tmdb_data["release_date"], "%Y-%m-%d").strftime("%B %d, %Y")
-            else:
-                release_fmt = f"{int(year)}"
-            st.write(f"**📅 Release Date:** {release_fmt}")
-        except:
-            st.write(f"**📅 Release Date:** {int(year)}")
+    # Release date from TMDB if present; otherwise use MovieLens year (if available)
+    release_fmt = None
+    try:
+        if tmdb_data and tmdb_data.get("release_date"):
+            release_fmt = datetime.strptime(tmdb_data["release_date"], "%Y-%m-%d").strftime("%B %d, %Y")
+        elif movie_year is not None and pd.notna(movie_year):
+            release_fmt = f"{int(movie_year)}"
+    except Exception:
+        if movie_year is not None and pd.notna(movie_year):
+            release_fmt = f"{int(movie_year)}"
+    if release_fmt:
+        st.write(f"**📅 Release Date:** {release_fmt}")
 
     # Runtime (from TMDB if available)
     if tmdb_data and tmdb_data.get("runtime"):
@@ -1174,15 +1196,14 @@ with col2:
         
 # --- All recommendation sections under the details ---
 try:
-    # Content-Based Filtering (already horizontal UI)
-    render_content_based_recommendations(detail_id_int, movies_df, rec_vectorizer, rec_tfidf_matrix)
+    # Content-Based Filtering (MovieLens-based)
+    if detail_id_int is not None and not movies_df.empty:
+        render_content_based_recommendations(detail_id_int, movies_df, rec_vectorizer, rec_tfidf_matrix)
 
-    # Collaborative Filtering (new horizontal UI)
-    render_cf_section_horizontal(int(movie_id))
-
-    # Hybrid Filtering (new horizontal UI)
-    render_hybrid_section_horizontal(int(movie_id))
-
+    # Collaborative Filtering and Hybrid require TMDB id
+    if tmdb_id is not None:
+        render_cf_section_horizontal(int(tmdb_id))
+        render_hybrid_section_horizontal(int(tmdb_id))
     
 except Exception as e:
     st.warning(f"Recommendations unavailable: {e}")
