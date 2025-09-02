@@ -267,7 +267,7 @@ st.set_page_config(
     page_title="MovieVerse - AI Movie Recommendations",
     page_icon="🎬",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="collapsed"
 )
 
 # Custom CSS for creative modern UI (simplified for MovieLens data)

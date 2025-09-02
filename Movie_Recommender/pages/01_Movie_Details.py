@@ -12,7 +12,7 @@ from sklearn.preprocessing import MultiLabelBinarizer
 API_KEY = "6272a18b79461f7987d2f1047b3d1198"
 API_BASE_URL = "https://api.themoviedb.org/3"
 
-st.set_page_config(page_title="Movie Details", page_icon="🎬", layout="wide")
+st.set_page_config(page_title="Movie Details", page_icon="🎬", layout="wide", initial_sidebar_state="collapsed")
 
 # ----- TMDB API Functions -----
 @st.cache_data
@@ -166,6 +166,12 @@ def load_custom_css():
         --text:#f0f0f0;
         --text-secondary:#b0b0b0
         }
+
+    html, body, .stApp {
+        background: linear-gradient(135deg, #1e1e2f, #2e2e4e);
+        color: white;
+        font-family: 'Segoe UI', sans-serif;
+    }
         
     .detail-container{
         background:var(--card-bg);
@@ -201,6 +207,11 @@ def load_custom_css():
         border-radius:50px;
         font-weight:600
         }
+    
+    .rating-text{
+        font-size:.8rem;
+        font-weight:600;
+        }
 
     .tag-item {
         display: inline-block;
@@ -217,6 +228,34 @@ def load_custom_css():
     """,
         unsafe_allow_html=True,
     )
+
+def generate_star_display_html(rating, max_rating=5):
+    """Generate HTML for star display in carousel"""
+    if pd.isna(rating) or rating == 0:
+        return ''.join(['<span class="star empty">☆</span>' for _ in range(max_rating)])
+
+    rating = max(0, min(rating, max_rating))
+    full_stars = int(rating)
+    has_half = (rating - full_stars) >= 0.5
+    
+    html = ''
+    
+    # Full stars
+    for i in range(full_stars):
+        html += '<span class="star">⭐</span>'
+    
+    # Half star
+    if has_half:
+        html += '<span class="star">★</span>'
+        empty_count = max_rating - full_stars - 1
+    else:
+        empty_count = max_rating - full_stars
+    
+    # Empty stars
+    for i in range(empty_count):
+        html += '<span class="star empty">☆</span>'
+    
+    return html
 
 # Content-Based Filtering Functions
 import pandas as pd
@@ -422,57 +461,11 @@ def hybrid_recommendations(
         print(f"Hybrid filtering error: {e}")
         return pd.DataFrame()
 
-def render_content_based_section(target_tmdb_id: int):
-    """Render content-based recommendations section."""
-    ratings, movies, links = load_ml_small()
-    recs = content_based_recommendations(
-        target_tmdb_id=target_tmdb_id,
-        movies=movies,
-        links=links,
-        top_n=12
-    )
-    
-    st.markdown("### 🎭 More Like This")
-    st.caption("Content-based filtering using genre similarities.")
-    
-    if recs.empty:
-        st.info("No similar movies found based on content features.")
-        return
-    
-    # Show a responsive grid (4 per row)
-    cols = st.columns(4, gap="large")
-    for i, (_, row) in enumerate(recs.iterrows()):
-        poster, tmdb_rating, release_date = fetch_tmdb_brief(int(row.tmdbId))
-        with cols[i % 4]:
-            link = f"/Movie_Details?movie_id={int(row.tmdbId)}&source=movielens"
-            
-            # Display similarity as percentage
-            similarity_pct = f"{row.similarity:.1%}"
-            
-            st.markdown(
-                f"""
-                <a href="{link}" target="_self" style="text-decoration:none;color:inherit">
-                <div style="background:#1a1a25;border:1px solid #2a2a35;border-radius:12px;
-                            padding:12px;margin:12px 12px;display:flex;flex-direction:column;
-                            justify-content:space-between;height:100%">
-                    <img src="{poster or 'https://via.placeholder.com/300x450?text=No+Poster'}"
-                        style="width:100%;border-radius:8px;margin-bottom:10px" />
-                    <div style="font-weight:700;line-height:1.2;margin-bottom:6px;
-                                height:40px;overflow:hidden;display:-webkit-box;
-                                -webkit-line-clamp:2;-webkit-box-orient:vertical;">
-                        {row.title}
-                    </div>
-                    <div style="font-size:.9rem;color:#b0b0b0">
-                        🎯 {similarity_pct} similar
-                    </div>
-                </div>
-                </a>
-                """,
-                unsafe_allow_html=True
-            )
+def render_hybrid_section_horizontal(target_tmdb_id: int):
+    """Render Hybrid recommendations using the horizontal 'rec-card' design."""
+    # Ensure CSS is loaded
+    load_content_based_css()
 
-def render_hybrid_section(target_tmdb_id: int):
-    """Render hybrid recommendations section."""
     ratings, movies, links = load_ml_small()
     recs = hybrid_recommendations(
         target_tmdb_id=target_tmdb_id,
@@ -483,52 +476,73 @@ def render_hybrid_section(target_tmdb_id: int):
         content_weight=0.4,
         top_n=12
     )
-    
-    st.markdown("### 🚀 Best of Both Worlds")
-    st.caption("Hybrid filtering combining user ratings and content similarity (60% collaborative, 40% content).")
-    
+
+    st.markdown("---")
+    st.subheader("🚀 Best of Both Worlds")
+    st.caption("Hybrid filtering combining collaborative (60%) and content (40%).")
+
     if recs.empty:
         st.info("No hybrid recommendations available.")
         return
-    
-    # Show a responsive grid (4 per row)
-    cols = st.columns(4, gap="large")
-    for i, (_, row) in enumerate(recs.iterrows()):
-        poster, tmdb_rating, release_date = fetch_tmdb_brief(int(row.tmdbId))
-        with cols[i % 4]:
-            link = f"/Movie_Details?movie_id={int(row.tmdbId)}&source=movielens"
+
+    cards_html = ['<div class="rec-container">']
+
+    for _, row in recs.iterrows():
+        tmdb_id = int(row["tmdbId"])
+        title_full = (row.get("title") or "").strip()
+        clean_title = title_full.rsplit(" (", 1)[0] if " (" in title_full else title_full
+        display_title = (clean_title[:25] + "...") if len(clean_title) > 25 else clean_title
+
+        poster_url, _, release_date = fetch_tmdb_brief(tmdb_id)
+        year_display = ""
+        if release_date:
+            try:
+                year_display = str(datetime.strptime(release_date, "%Y-%m-%d").year)
+            except Exception:
+                year_display = ""
+
+        hybrid_score = row.get("hybrid_score", np.nan)
+        cf_score = row.get("cf_score", 0.0)
+        content_score = row.get("content_score", 0.0)
+        ml_avg = row.get("avg_rating", np.nan)
+        ml_cnt = int(row.get("rating_cnt", 0)) if pd.notna(row.get("rating_cnt", np.nan)) else 0
+        ml_text = f"{ml_avg:.2f}/5 • {ml_cnt} ratings" if pd.notna(ml_avg) and ml_cnt > 0 else "New"
+
+        poster_html = (
+            f'<img src="{poster_url}" class="rec-poster" alt="{display_title} Poster">'
+            if poster_url else
+            '<div class="rec-placeholder">🎬</div>'
+        )
+
+        score_lines = []
+        if pd.notna(hybrid_score):
+            score_lines.append(f'⚡ Score: {hybrid_score:.2f}')
+        score_lines.append(f'CF {cf_score:.2f} • Content {content_score:.2f}')
+        score_lines.append(f'⭐ {ml_text}')
+        metrics_html = f'<div style="font-size:.75rem;color:#aaa;margin-top:4px;">' + "<br>".join(score_lines) + "</div>"
+
+        cards_html.append(
+            f'<a href="/Movie_Details?movie_id={tmdb_id}&source=movielens" '
+            f'style="text-decoration:none;color:inherit;" class="rec-link">'
+            f'<div class="rec-card">'
+            f'{poster_html}'
+            f'<div class="rec-title">{display_title}</div>'
+            f'<div class="rec-year">{year_display}</div>'
+            f'{metrics_html}'
+            f'</div></a>'
+        )
+
+    cards_html.append('</div>')
+    st.markdown("".join(cards_html), unsafe_allow_html=True)
+
             
-            # Format scores
-            hybrid_score = f"{row.hybrid_score:.2f}"
-            ml_avg = row.get("avg_rating", np.nan)
-            ml_cnt = row.get("rating_cnt", 0)
-            ml_text = f"{ml_avg:.2f}/5 • {int(ml_cnt)} ratings" if pd.notna(ml_avg) and ml_cnt > 0 else "New"
-            
-            st.markdown(
-                f"""
-                <a href="{link}" target="_self" style="text-decoration:none;color:inherit">
-                <div style="background:#1a1a25;border:1px solid #2a2a35;border-radius:12px;
-                            padding:12px;margin:12px 12px;display:flex;flex-direction:column;
-                            justify-content:space-between;height:100%">
-                    <img src="{poster or 'https://via.placeholder.com/300x450?text=No+Poster'}"
-                        style="width:100%;border-radius:8px;margin-bottom:10px" />
-                    <div style="font-weight:700;line-height:1.2;margin-bottom:6px;
-                                height:40px;overflow:hidden;display:-webkit-box;
-                                -webkit-line-clamp:2;-webkit-box-orient:vertical;">
-                        {row.title}
-                    </div>
-                    <div style="font-size:.9rem;color:#b0b0b0">
-                        ⚡ Score: {hybrid_score}<br>
-                        ⭐ {ml_text}
-                    </div>
-                </div>
-                </a>
-                """,
-                unsafe_allow_html=True
-            )
 
 # Updated render_cf_section to fix the captions
-def render_cf_section_updated(target_tmdb_id: int):
+def render_cf_section_horizontal(target_tmdb_id: int):
+    """Render CF recommendations using the horizontal 'rec-card' design."""
+    # Ensure CSS is loaded
+    load_content_based_css()
+
     ratings, movies, links = load_ml_small()
     recs = item_item_recommendations(
         target_tmdb_id=target_tmdb_id,
@@ -539,44 +553,65 @@ def render_cf_section_updated(target_tmdb_id: int):
         top_n=12
     )
 
-    st.markdown("### 🔁 Because You Liked This")
-    st.caption("Item-Item Collaborative Filtering using Pearson correlation. Requires at least 20 users who rated both movies.")
+    st.markdown("---")
+    st.subheader("🔁 Because You Liked This")
+    st.caption("Item–Item Collaborative Filtering (Pearson). Requires at least 20 users who rated both movies.")
 
     if recs.empty:
         st.info("Not enough overlapping ratings to compute reliable neighbors for this title.")
         return
 
-    # Show a responsive grid (4 per row)
-    cols = st.columns(4, gap="large")
-    for i, (_, row) in enumerate(recs.iterrows()):
-        poster, _, _ = fetch_tmdb_brief(int(row.tmdbId))
-        with cols[i % 4]:
-            link = f"/Movie_Details?movie_id={int(row.tmdbId)}&source=movielens"
-            ml_avg = row.get("avg_rating", np.nan)
-            ml_cnt = row.get("rating_cnt", 0)
-            ml_text = f"{ml_avg:.2f}/5 • {int(ml_cnt)} ratings" if pd.notna(ml_avg) else "—"
+    # Build one horizontal scroller
+    cards_html = ['<div class="rec-container">']
 
-            st.markdown(
-                f"""
-                <a href="{link}" target="_self" style="text-decoration:none;color:inherit">
-                <div style="background:#1a1a25;border:1px solid #2a2a35;border-radius:12px;
-                            padding:12px;margin:12px 12px;display:flex;flex-direction:column;
-                            justify-content:space-between;height:100%">
-                    <img src="{poster or 'https://via.placeholder.com/300x450?text=No+Poster'}"
-                        style="width:100%;border-radius:8px;margin-bottom:10px" />
-                    <div style="font-weight:700;line-height:1.2;margin-bottom:6px;
-                                height:40px;overflow:hidden;display:-webkit-box;
-                                -webkit-line-clamp:2;-webkit-box-orient:vertical;">
-                        {row.title}
-                    </div>
-                    <div style="font-size:.9rem;color:#b0b0b0">
-                        ⭐ {ml_text}
-                    </div>
-                </div>
-                </a>
-                """,
-                unsafe_allow_html=True
-            )
+    for _, row in recs.iterrows():
+        tmdb_id = int(row["tmdbId"])
+        title_full = (row.get("title") or "").strip()
+        # Trim year suffix like "Toy Story (1995)" for prettier display
+        clean_title = title_full.rsplit(" (", 1)[0] if " (" in title_full else title_full
+        display_title = (clean_title[:25] + "...") if len(clean_title) > 25 else clean_title
+
+        poster_url, _, release_date = fetch_tmdb_brief(tmdb_id)
+        year_display = ""
+        if release_date:
+            try:
+                year_display = str(datetime.strptime(release_date, "%Y-%m-%d").year)
+            except Exception:
+                year_display = ""
+
+        # Metrics
+        sim = row.get("similarity", np.nan)
+        overlap = int(row.get("overlap", 0)) if pd.notna(row.get("overlap", np.nan)) else 0
+        ml_avg = row.get("avg_rating", np.nan)
+        ml_cnt = int(row.get("rating_cnt", 0)) if pd.notna(row.get("rating_cnt", np.nan)) else 0
+        ml_text = f"{ml_avg:.2f}/5 • {ml_cnt} ratings" if pd.notna(ml_avg) and ml_cnt > 0 else "New"
+
+        poster_html = (
+            f'<img src="{poster_url}" class="rec-poster" alt="{display_title} Poster">'
+            if poster_url else
+            '<div class="rec-placeholder">🎬</div>'
+        )
+
+        metrics_html = (
+            f'<div style="font-size:.75rem;color:#aaa;margin-top:4px;">'
+            f'📈 Similarity: {sim:.2f} • 👥 Overlap: {overlap}<br>⭐ {ml_text}'
+            f'</div>'
+        ) if pd.notna(sim) else f'<div style="font-size:.75rem;color:#aaa;margin-top:4px;">⭐ {ml_text}</div>'
+
+        cards_html.append(
+            f'<a href="/Movie_Details?movie_id={tmdb_id}&source=movielens" '
+            f'style="text-decoration:none;color:inherit;" class="rec-link">'
+            f'<div class="rec-card">'
+            f'{poster_html}'
+            f'<div class="rec-title">{display_title}</div>'
+            f'<div class="rec-year">{year_display}</div>'
+            f'{metrics_html}'
+            f'</div></a>'
+        )
+
+    cards_html.append('</div>')
+    st.markdown("".join(cards_html), unsafe_allow_html=True)
+
 
 def load_content_based_css():
     """Load CSS specifically for content-based recommendations"""
@@ -690,7 +725,10 @@ def render_content_based_recommendations(detail_id_int, movies_df, vectorizer, t
     load_content_based_css()
     
     st.markdown("---")
-    st.subheader("🍿 Because you liked this movie...")
+    st.subheader("🍿 More like this movie...")
+    st.caption("Content-based filtering using genre similarities.")
+
+
 
     try:
         # Find index of the current movie
@@ -1052,18 +1090,20 @@ with col2:
         else:
             st.write("**⏱️ Runtime:** N/A")
 
-    # Rating - prioritize TMDB rating if available
-    if tmdb_data and tmdb_data.get("vote_average"):
-        tmdb_rating = tmdb_data.get("vote_average")
-        st.markdown(f'<div class="rating-display">⭐ {tmdb_rating}/10</div>', unsafe_allow_html=True)
-    elif avg_rating > 0:
-        st.markdown(f'<div class="rating-display">⭐ {avg_rating:.1f}/5.0</div>', unsafe_allow_html=True)
+    # Rating
+    if avg_rating > 0:
+        star_html = generate_star_display_html(avg_rating, max_rating=5)
+        st.markdown(f'<div class="rating-display">{star_html} <div class="rating-text">{avg_rating:.1f}/5</div></div>', unsafe_allow_html=True)
+        st.markdown("")
 
     # Genres - prioritize TMDB if available
     if tmdb_data and tmdb_data.get("genres"):
         st.markdown("**🎞️ Genres:**")
-        for genre in tmdb_data["genres"]:
-            st.markdown(f'<span class="genre-badge">{genre["name"]}</span>', unsafe_allow_html=True)
+        # Create a single string with all genres joined horizontally
+        genres_html = ''.join([f'<span class="genre-badge">{genre["name"]}</span>' for genre in tmdb_data["genres"]])
+
+        # Display the genres in a single <p> tag
+        st.markdown(f'<p class="genre-container">{genres_html}</p>', unsafe_allow_html=True)
     else:
         # Fallback to MovieLens genres
         genres = movie.get("genre_list", [])
@@ -1108,32 +1148,41 @@ with col2:
 
     # Additional Information
     st.subheader("📌 Additional Information")
-    budget = data.get("budget") or 0
-    revenue = data.get("revenue") or 0
-    lang = (data.get("original_language") or "").upper()
-    status = data.get("status") or ""
-    if budget > 0:
-        st.write(f"**Budget:** ${int(budget):,}")
-    if revenue > 0:
-        st.write(f"**Revenue:** ${int(revenue):,}")
-    if lang:
-        st.write(f"**Original Language:** {lang}")
-    if status:
-        st.write(f"**Status:** {status}")
-    hp = (data.get("homepage") or "").strip()
-    if hp:
-        st.markdown(f"🔗 [Official Website]({hp})")
+    if tmdb_data:
+            # Budget and Revenue
+            budget = tmdb_data.get("budget", 0)
+            revenue = tmdb_data.get("revenue", 0)
+            if budget > 0:
+                st.write(f"**Budget:** ${int(budget):,}")
+            if revenue > 0:
+                st.write(f"**Revenue:** ${int(revenue):,}")
+            
+            # Original Language
+            lang = (tmdb_data.get("original_language") or "").upper()
+            if lang:
+                st.write(f"**Original Language:** {lang}")
+            
+            # Status
+            status = tmdb_data.get("status") or ""
+            if status:
+                st.write(f"**Status:** {status}")
+            
+            # Homepage
+            hp = (tmdb_data.get("homepage") or "").strip()
+            if hp:
+                st.markdown(f"🔗 [Official Website]({hp})")
         
 # --- All recommendation sections under the details ---
 try:
-    # Collaborative Filtering
-    render_cf_section_updated(int(movie_id))
-    
-    # Content-Based Filtering  
+    # Content-Based Filtering (already horizontal UI)
     render_content_based_recommendations(detail_id_int, movies_df, rec_vectorizer, rec_tfidf_matrix)
-    
-    # Hybrid Filtering
-    render_hybrid_section(int(movie_id))
+
+    # Collaborative Filtering (new horizontal UI)
+    render_cf_section_horizontal(int(movie_id))
+
+    # Hybrid Filtering (new horizontal UI)
+    render_hybrid_section_horizontal(int(movie_id))
+
     
 except Exception as e:
     st.warning(f"Recommendations unavailable: {e}")
