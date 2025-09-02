@@ -4,6 +4,12 @@ from datetime import datetime
 import ast
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
+import re
+import requests
+
+# TMDB API Configuration
+API_KEY = "6272a18b79461f7987d2f1047b3d1198"
+API_BASE_URL = "https://api.themoviedb.org/3"
 
 # Navigation bar function
 def load_navbar():
@@ -106,64 +112,170 @@ def load_navbar():
     </div>
     """, unsafe_allow_html=True)
 
+# TMDB API Functions
+@st.cache_data
+def fetch_movie_details_by_tmdb_id(tmdb_id):
+    """Fetch movie details from TMDB API"""
+    try:
+        url = f"{API_BASE_URL}/movie/{tmdb_id}"
+        params = {
+            "api_key": API_KEY,
+            "language": "en-US",
+            "append_to_response": "credits",
+        }
+        r = requests.get(url, params=params, timeout=10)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        st.error(f"Error fetching movie details: {e}")
+        return None
+
+@st.cache_data
+def search_tmdb_by_title(movie_title, year=None):
+    """Search TMDB for a movie by title and optionally year"""
+    try:
+        url = f"{API_BASE_URL}/search/movie"
+        params = {
+            "api_key": API_KEY,
+            "query": movie_title,
+            "language": "en-US"
+        }
+        if year:
+            params["year"] = int(year)
+        
+        r = requests.get(url, params=params, timeout=10)
+        r.raise_for_status()
+        results = r.json().get("results", [])
+        return results[0] if results else None
+    except Exception:
+        return None
+
+@st.cache_data
+def get_poster_for_movie(movie_title, year=None):
+    """Get poster URL for a movie from TMDB"""
+    tmdb_result = search_tmdb_by_title(movie_title, year)
+    if tmdb_result and tmdb_result.get('poster_path'):
+        return f"https://image.tmdb.org/t/p/w300{tmdb_result['poster_path']}"
+    return None
+
 # Load movies data
 @st.cache_data
 def load_movie_data():
     try:
+        # Load MovieLens dataset
         df = pd.read_csv("dataset/ml-latest-small/movies.csv")
         
-        # Optional: extract year from title (e.g., "Toy Story (1995)")
+        # Extract year from title (e.g., "Toy Story (1995)")
         df['year'] = df['title'].str.extract(r'\((\d{4})\)')
+        df['year'] = pd.to_numeric(df['year'], errors='coerce')
+        
+        # Clean title (remove year from title for display)
+        df['clean_title'] = df['title'].str.replace(r'\s*\(\d{4}\)\s*$', '', regex=True)
+        
+        # Split genres into list
+        df['genre_list'] = df['genres'].str.split('|')
+        
         return df
     except FileNotFoundError:
         st.error("❌ movies.csv not found. Please check the dataset path.")
         return pd.DataFrame()
 
-# Load ratings and links
+# Load tags data
 @st.cache_data
-def load_ratings_links():
+def load_tags_data():
+    """Load tags data from MovieLens dataset"""
+    try:
+        tags_df = pd.read_csv("dataset/ml-latest-small/tags.csv")
+        
+        # Clean and normalize tags
+        tags_df['tag'] = tags_df['tag'].astype(str).str.lower().str.strip()
+        
+        # Remove very short tags (less than 2 characters) and common words
+        tags_df = tags_df[tags_df['tag'].str.len() >= 2]
+        
+        # Aggregate all tags for each movie
+        movie_tags = tags_df.groupby('movieId')['tag'].apply(
+            lambda x: ' '.join(x.unique())  # Use unique to avoid duplicates
+        ).reset_index()
+        
+        return tags_df, movie_tags
+    except FileNotFoundError:
+        st.warning("⚠️ tags.csv not found. Recommendations will use only titles and genres.")
+        return pd.DataFrame(), pd.DataFrame()
+
+# Load ratings and calculate average ratings
+@st.cache_data
+def load_ratings_with_stats():
     try:
         ratings = pd.read_csv("dataset/ml-latest-small/ratings.csv")
-        links   = pd.read_csv("dataset/ml-latest-small/links.csv")
-        return ratings, links
+        
+        # Calculate average rating and count for each movie
+        rating_stats = ratings.groupby('movieId').agg({
+            'rating': ['mean', 'count']
+        }).round(2)
+        rating_stats.columns = ['avg_rating', 'rating_count']
+        rating_stats = rating_stats.reset_index()
+        
+        return ratings, rating_stats
     except FileNotFoundError as e:
         st.error(f"❌ File not found: {e}")
         return pd.DataFrame(), pd.DataFrame()
 
-# Use them
+# Load data
 movies_df = load_movie_data()
-ratings_df, links_df = load_ratings_links()
+tags_df, movie_tags_df = load_tags_data()
+ratings_df, rating_stats_df = load_ratings_with_stats()
 
+# Merge movies with rating stats
+if not movies_df.empty and not rating_stats_df.empty:
+    movies_df = movies_df.merge(rating_stats_df, on='movieId', how='left')
+    movies_df['avg_rating'] = movies_df['avg_rating'].fillna(0)
+    movies_df['rating_count'] = movies_df['rating_count'].fillna(0)
 
-# Helper function to safely parse JSON-like strings
-def safe_parse_json(json_str):
-    try:
-        if pd.isna(json_str) or json_str == '':
-            return []
-        return ast.literal_eval(json_str)
-    except:
-        return []
+# Merge movies with tags
+if not movies_df.empty and not movie_tags_df.empty:
+    movies_df = movies_df.merge(movie_tags_df, on='movieId', how='left')
+    movies_df['tag'] = movies_df['tag'].fillna('')
+else:
+    movies_df['tag'] = ''
 
-# Helper function to extract names from genre/cast data
-def extract_names(data_list, key='name'):
-    if not data_list:
-        return []
-    return [item.get(key, '') for item in data_list if isinstance(item, dict)]
+# Cache vectorizer and tf-idf matrix for SEARCH (title + genres only, NO tags)
+@st.cache_resource
+def get_search_vectorizer_and_matrix(dataframe):
+    # Create search blob from title and genres ONLY (no tags for search)
+    dataframe['title'] = dataframe['title'].fillna('')
+    dataframe['genres'] = dataframe['genres'].fillna('')
+    dataframe['clean_title'] = dataframe['clean_title'].fillna('')
+    
+    # Create searchable text from title and genres only
+    dataframe['search_blob'] = (
+        dataframe['title'] + ' ' + 
+        dataframe['clean_title'] + ' ' + 
+        dataframe['genres'].str.replace('|', ' ')
+    )
+    
+    vectorizer = TfidfVectorizer(stop_words='english', max_features=5000)
+    tfidf_matrix = vectorizer.fit_transform(dataframe['search_blob'])
+    return vectorizer, tfidf_matrix
+
+if not movies_df.empty:
+    # For search functionality (title + genres only)
+    search_vectorizer, search_tfidf_matrix = get_search_vectorizer_and_matrix(movies_df)
 
 # Page config with modern dark theme
 st.set_page_config(
     page_title="MovieVerse - AI Movie Recommendations",
     page_icon="🎬",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="collapsed"
 )
 
-# Custom CSS for creative modern UI
+# Custom CSS for creative modern UI (simplified for MovieLens data)
 st.markdown("""
     <style>
     :root {
-        --primary: #b31b1b;  /* Dark red color */
-        --primary-hover: #d11f1f;  /* Slightly brighter on hover */
+        --primary: #b31b1b;
+        --primary-hover: #d11f1f;
         --dark-bg: #0f0f15;
         --card-bg: #141414;
         --accent: #ff6b6b;
@@ -178,7 +290,6 @@ st.markdown("""
         font-family: 'Segoe UI', sans-serif;
     }
     
-    /* Centered header container */
     .header-container {
         display: flex;
         flex-direction: column;
@@ -189,7 +300,6 @@ st.markdown("""
         padding: 1rem 0;
     }
     
-    /* Animated gradient text for header */
     @keyframes gradientBG {
         0% {background-position: 0% 50%;}
         50% {background-position: 100% 50%;}
@@ -219,7 +329,6 @@ st.markdown("""
         line-height: 1.6;
     }
     
-    /* Cinematic search box */
     .search-box-container {
         background: rgba(20, 20, 20, 0.7);
         border-radius: 16px;
@@ -235,29 +344,6 @@ st.markdown("""
         overflow: hidden;
     }
     
-    .search-box-container::before {
-        content: '';
-        position: absolute;
-        top: -50%;
-        left: -50%;
-        width: 200%;
-        height: 200%;
-        background: linear-gradient(
-            to bottom right,
-            transparent 45%,
-            rgba(179, 27, 27, 0.1) 50%,
-            transparent 55%
-        );
-        animation: shine 4s infinite;
-        transform: rotate(30deg);
-    }
-    
-    @keyframes shine {
-        0% {transform: translateX(-100%) rotate(30deg);}
-        100% {transform: translateX(100%) rotate(30deg);}
-    }
-    
-    /* Search input with film strip effect */
     .stTextInput>div>div>input {
         background-color: rgba(10, 10, 10, 0.8) !important;
         color: var(--text) !important;
@@ -276,7 +362,6 @@ st.markdown("""
             0 0 20px rgba(179, 27, 27, 0.2) !important;
     }
     
-    /* New selector (add this) */
     div[data-testid="stButton"] > button[kind="primary"] {
         background: var(--primary) !important;
         color: white !important;
@@ -296,7 +381,6 @@ st.markdown("""
         box-shadow: 0 6px 12px rgba(0, 0, 0, 0.4) !important;
     }
     
-    /* Feature chips with film reel effect */
     .features-container {
         display: flex;
         justify-content: center;
@@ -321,23 +405,12 @@ st.markdown("""
         box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
     }
     
-    .feature-chip::before {
-        content: '';
-        position: absolute;
-        top: 0;
-        left: 0;
-        right: 0;
-        height: 2px;
-        background: linear-gradient(90deg, transparent, var(--primary), transparent);
-    }
-    
     .feature-chip:hover {
         transform: translateY(-3px);
         box-shadow: 0 8px 25px rgba(179, 27, 27, 0.3);
         border-color: var(--primary);
     }
     
-    /* Movie cards with cinematic effect */
     .movie-card {
         display: flex;
         gap: 25px;
@@ -351,16 +424,7 @@ st.markdown("""
         box-shadow: 0 8px 25px rgba(0, 0, 0, 0.3);
         position: relative;
         overflow: hidden;
-    }
-    
-    .movie-card::after {
-        content: '';
-        position: absolute;
-        top: 0;
-        left: 0;
-        right: 0;
-        height: 3px;
-        background: linear-gradient(90deg, var(--primary), var(--accent));
+        cursor: pointer;
     }
     
     .movie-card:hover {
@@ -373,31 +437,24 @@ st.markdown("""
     
     .movie-poster {
         border-radius: 12px;
-        width: 200px;
-        height: 300px;
+        width: 150px;
+        height: 225px;
         object-fit: cover;
-        transition: transform 0.4s ease;
-        box-shadow: 0 10px 25px rgba(0, 0, 0, 0.4);
-        position: relative;
+        flex-shrink: 0;
+        box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
     }
     
-    .movie-poster::before {
-        content: '';
-        position: absolute;
-        top: 0;
-        left: 0;
-        right: 0;
-        bottom: 0;
-        background: linear-gradient(
-            to bottom,
-            transparent 60%,
-            rgba(0,0,0,0.7) 90%
-        );
+    .movie-placeholder {
         border-radius: 12px;
-    }
-    
-    .movie-poster:hover {
-        transform: scale(1.05) rotate(1deg);
+        width: 150px;
+        height: 225px;
+        background: linear-gradient(135deg, #333, #555);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: #999;
+        font-size: 3rem;
+        flex-shrink: 0;
     }
     
     .movie-info {
@@ -424,6 +481,7 @@ st.markdown("""
         color: var(--text-secondary);
         font-size: 1rem;
         align-items: center;
+        flex-wrap: wrap;
     }
     
     .movie-rating {
@@ -438,21 +496,24 @@ st.markdown("""
         border: 1px solid rgba(255, 193, 7, 0.3);
     }
     
-    .movie-overview {
-        color: var(--text-secondary);
-        line-height: 1.7;
-        margin-top: 10px;
-        font-size: 1rem;
+    .genre-badge {
+        display: inline-block;
+        background: rgba(179, 27, 27, 0.15);
+        color: var(--primary);
+        padding: 4px 12px;
+        border-radius: 50px;
+        margin-right: 8px;
+        margin-bottom: 8px;
+        font-size: 0.85rem;
+        border: 1px solid rgba(179, 27, 27, 0.3);
     }
     
-    
-    .release-year {
+    .rating-count {
         color: var(--text-secondary);
-        opacity: 0.9;
-        font-weight: 500;
+        font-size: 0.9rem;
+        opacity: 0.8;
     }
     
-    /* Results count */
     .results-count {
         color: var(--text-secondary);
         margin-bottom: 2rem;
@@ -461,45 +522,35 @@ st.markdown("""
         font-weight: 300;
     }
     
-    /* Detail page styles */
-    .detail-container {
-        max-width: 1200px;
-        margin: 0 auto;
-        padding: 2rem;
+    .tags-info {
+        background: rgba(30, 30, 50, 0.6);
+        padding: 10px 15px;
+        border-radius: 8px;
+        margin: 10px 0;
+        border: 1px solid rgba(100, 100, 150, 0.3);
     }
     
-    .tagline {
-        font-style: italic;
-        color: var(--primary);
-        margin-bottom: 10px;
-        font-size: 1.1rem;
+    .tags-title {
+        color: #9CA3AF;
+        font-size: 0.9rem;
+        font-weight: 600;
+        margin-bottom: 5px;
     }
     
-    .genre-badge {
+    .tag-item {
         display: inline-block;
-        background: rgba(179, 27, 27, 0.15);
-        color: var(--primary);
-        padding: 6px 14px;
-        border-radius: 50px;
-        margin-right: 8px;
-        margin-bottom: 8px;
-        font-size: 0.85rem;
-        border: 1px solid rgba(179, 27, 27, 0.3);
+        background: rgba(99, 102, 241, 0.15);
+        color: #A5B4FC;
+        padding: 2px 8px;
+        border-radius: 15px;
+        margin: 2px 4px 2px 0;
+        font-size: 0.75rem;
+        border: 1px solid rgba(99, 102, 241, 0.3);
     }
     
-    /* Responsive adjustments */
     @media (max-width: 768px) {
         .search-title {
             font-size: 2.2rem;
-        }
-        
-        .search-subtitle {
-            font-size: 1rem;
-            padding: 0 1rem;
-        }
-        
-        .search-box-container {
-            padding: 2rem 1.5rem;
         }
         
         .movie-card {
@@ -508,241 +559,111 @@ st.markdown("""
             padding: 20px;
         }
         
-        .movie-poster {
+        .movie-poster, .movie-placeholder {
             width: 100%;
             height: auto;
             aspect-ratio: 2/3;
-        }
-        
-        .detail-container {
-            padding: 1.5rem;
         }
     }
     </style>
 """, unsafe_allow_html=True)
 
-# Load data
-df = load_movie_data()
-if df.empty:
-    st.stop()
-
-# Cache vectorizer and tf-idf matrix
-@st.cache_resource
-def get_vectorizer_and_matrix(dataframe):
-    dataframe['title'] = dataframe['title'].fillna('')
-    dataframe['overview'] = dataframe['overview'].fillna('')
-    dataframe['original_title'] = dataframe['original_title'].fillna('')
-    dataframe['search_blob'] = dataframe['title'] + ' ' + dataframe['overview'] + ' ' + dataframe['original_title']
-    vectorizer = TfidfVectorizer(stop_words='english')
-    tfidf_matrix = vectorizer.fit_transform(dataframe['search_blob'])
-    return vectorizer, tfidf_matrix
-
-vectorizer, tfidf_matrix = get_vectorizer_and_matrix(df)
-
-# Get movie_id from query params
+# Check if we should redirect to details page
 raw_param = st.query_params.get("movie_id")
 detail_id = raw_param if isinstance(raw_param, str) else raw_param[0] if raw_param else None
 
-# ---------------- Detail Page ---------------- #
+# If movie_id is provided, redirect to 01_Movie_Details.py
 if detail_id is not None:
-    # Add navigation bar to detail page too
-    load_navbar()
+    # Store movie_id in session state for the details page to access
+    st.session_state.movie_id = detail_id
+    # Redirect to the details page
+    st.switch_page("pages/01_Movie_Details.py")
 
-    # Use the already-loaded `df`; don't call load_data()/load_movie_data() again
-    try:
-        # Normalize the id types so comparison works regardless of CSV typing
-        detail_id_int = int(str(detail_id).strip())
+# Main search page
+load_navbar()
 
-        # Some datasets store id as str, others as int; handle both safely
-        ids_as_int = pd.to_numeric(df['id'], errors='coerce')
-        movie_detail = df.loc[ids_as_int == detail_id_int]
+# Main header with centered design
+st.markdown("""
+    <div class="header-container">
+        <h1 class="search-title">Discover Films Just For You</h1>
+    </div>
+""", unsafe_allow_html=True)
 
-        if not movie_detail.empty:
-            movie = movie_detail.iloc[0]
+# Enhanced feature chips to reflect search capabilities (no tags mentioned for search)
+st.markdown("""
+    <div class="features-container">
+        <div class="feature-chip">🎬 Search by title</div>
+        <div class="feature-chip">🎭 Browse by genre</div>
+        <div class="feature-chip">📅 Filter by year</div>
+        <div class="feature-chip">🔍 NLP-powered search</div>
+    </div>
+""", unsafe_allow_html=True)
 
-            if st.button("⬅ Back to Search", key="back_button"):
-                st.query_params.clear()
-                st.rerun()
+# Search box
+search_query = st.text_input(
+    "",
+    placeholder="Search by movie title, genre, or keywords...",
+    key="search_input",
+    label_visibility="collapsed"
+)
 
-            col1, col2 = st.columns([1, 2])
-            with col1:
-                poster_path = movie.get("poster_path", None)
-                if pd.notna(poster_path) and str(poster_path).strip():
-                    st.image(
-                        f"https://image.tmdb.org/t/p/w400{poster_path}",
-                        caption=movie.get("title", "No Title"),
-                        use_column_width=True
-                    )
-                else:
-                    st.image(
-                        "https://via.placeholder.com/500x750?text=No+Poster",
-                        caption=movie.get("title", "No Title"),
-                        use_column_width=True
-                    )
+st.button("Find Movies", type="primary")
 
-            with col2:
-                st.title(movie.get("title", "No Title"))
+if search_query and not movies_df.empty:
+    with st.spinner('🔍 Searching with NLP and vector similarity...'):
+        # Use SEARCH vectorizer (title + genres only, NO tags)
+        query_vec = search_vectorizer.transform([search_query])
+        similarity_scores = cosine_similarity(query_vec, search_tfidf_matrix).flatten()
+        top_indices = similarity_scores.argsort()[::-1][:50]
+        results = movies_df.iloc[top_indices]
+        
+        # Filter out results with very low similarity scores
+        results_with_scores = results.copy()
+        results_with_scores['similarity'] = similarity_scores[top_indices]
+        results = results_with_scores[results_with_scores['similarity'] > 0.01].head(20)
 
-                tagline = movie.get("tagline", "")
-                if pd.notna(tagline) and str(tagline).strip():
-                    st.markdown(f"<div class='tagline'>*{tagline}*</div>", unsafe_allow_html=True)
-
-                release = movie.get("release_date", "")
-                runtime = movie.get("runtime", "?")
-                if pd.notna(release) and str(release).strip():
-                    try:
-                        release = datetime.strptime(str(release), "%Y-%m-%d").strftime("%B %d, %Y")
-                    except Exception:
-                        # keep original if parsing fails
-                        pass
-                st.caption(f"📅 {release or 'N/A'} • ⏱️ {runtime if pd.notna(runtime) else 'N/A'} min")
-
-                rating = movie.get("vote_average", None)
-                if pd.notna(rating):
-                    st.markdown(f"**⭐ Rating:** {rating}/10")
-
-                # Genres
-                genres = safe_parse_json(movie.get("genres", ""))
-                if genres:
-                    genre_names = extract_names(genres)
-                    if genre_names:
-                        st.markdown(
-                            "**🎞️ Genres:** " + " ".join(
-                                [f"<span class='genre-badge'>{g}</span>" for g in genre_names]
-                            ),
-                            unsafe_allow_html=True
-                        )
-
-                # Overview
-                st.subheader("📝 Overview")
-                overview = str(movie.get("overview", "")).strip()
-                st.write(overview if overview else "No description available.")
-
-                # Cast (if present in CSV)
-                cast_data = safe_parse_json(movie.get("cast", ""))
-                cast_names = extract_names(cast_data[:8]) if cast_data else []
-                if cast_names:
-                    st.subheader("👤 Top Cast")
-                    st.markdown(", ".join(cast_names))
-
-                # Extras
-                st.subheader("📌 Additional Information")
-                budget = movie.get("budget", 0)
-                revenue = movie.get("revenue", 0)
-                lang = movie.get("original_language", "")
-                status = movie.get("status", "")
-                if pd.notna(budget) and str(budget).isdigit() and int(budget) > 0:
-                    st.write(f"**Budget:** ${int(budget):,}")
-                if pd.notna(revenue) and str(revenue).isdigit() and int(revenue) > 0:
-                    st.write(f"**Revenue:** ${int(revenue):,}")
-                if pd.notna(lang) and str(lang).strip():
-                    st.write(f"**Original Language:** {str(lang).upper()}")
-                if pd.notna(status) and str(status).strip():
-                    st.write(f"**Status:** {status}")
-
-                homepage = movie.get("homepage", "")
-                if pd.notna(homepage) and str(homepage).strip():
-                    st.markdown(f"🔗 [Official Site]({homepage})")
-
-        else:
-            st.error("Movie details not found.")
-            if st.button("⬅ Back to Search", key="back_button_error"):
-                st.query_params.clear()
-                st.rerun()
-
-    except ValueError:
-        st.error("Invalid movie ID")
-        if st.button("⬅ Back to Search", key="back_button_invalid"):
-            st.query_params.clear()
-            st.rerun()
-
-
-# ---------------- Search Page ---------------- #
-else:
-    # Add navigation bar
-    load_navbar()
-    
-    # Main header with centered design
-    st.markdown("""
-        <div class="header-container">
-            <h1 class="search-title">Discover Films Just For You</h1>
-        </div>
-    """, unsafe_allow_html=True)
-    
-    # Feature chips
-    st.markdown("""
-        <div class="features-container">
-            <div class="feature-chip">🎬 Search by title</div>
-            <div class="feature-chip">🌟 Find by actor</div>
-            <div class="feature-chip">🎭 Browse by director</div>
-        </div>
-    """, unsafe_allow_html=True)
-    
-    # Search box
-    search_query = st.text_input(
-        "",
-        placeholder="Try search your movie here...",
-        key="search_input",
-        label_visibility="collapsed"
-    )
-    
-    st.button("Find Movies", type="primary")
-    st.markdown('</div>', unsafe_allow_html=True)
-    
-    if search_query:
-        with st.spinner('🔍 Finding the perfect movies...'):
-            query_vec = vectorizer.transform([search_query])
-            similarity_scores = cosine_similarity(query_vec, tfidf_matrix).flatten()
-            top_indices = similarity_scores.argsort()[::-1][:50]
-            results = df.iloc[top_indices]
+        if not results.empty:
+            st.markdown(f'<div class="results-count">Showing {len(results)} results</div>', unsafe_allow_html=True)
             
-            # Filter results to only include complete entries
-            results = results[
-                results['poster_path'].notna() &
-                results['poster_path'].str.strip().ne('') &
-                results['overview'].notna() &
-                results['overview'].str.strip().ne('') &
-                results['release_date'].notna() &
-                results['release_date'].str.strip().ne('') &
-                results['vote_average'].notna()
-            ].head(20)
+            for _, result in results.iterrows():
+                movie_id = result.get('movieId')
+                title = result.get('clean_title', result.get('title', 'No Title'))
+                year = result.get('year', '')
+                avg_rating = result.get('avg_rating', 0)
+                rating_count = result.get('rating_count', 0)
+                genres = result.get('genre_list', [])
+                similarity = result.get('similarity', 0)
 
-            if not results.empty:
-                # Extract release year from date
-                results['year'] = pd.to_datetime(results['release_date']).dt.year
-                
-                st.markdown(f'<div class="results-count">Showing {len(results)} results</div>', unsafe_allow_html=True)
-                
-                for _, result in results.iterrows():
-                    movie_id = result.get('id')
-                    title = result.get('title', 'No Title')
-                    year = result.get('year', '')
-                    overview = str(result.get('overview', '')).strip()
-                    vote_avg = result.get('vote_average', 0)
-                    poster_path = result.get('poster_path')
+                # Get poster URL from TMDB
+                poster_url = get_poster_for_movie(title, year if pd.notna(year) else None)
 
-                    if overview and len(overview) > 200:
-                        overview = overview[:200] + "..."
-                    
-                    poster_url = f"https://image.tmdb.org/t/p/w500{poster_path}" if pd.notna(poster_path) and poster_path else "https://via.placeholder.com/500x750?text=No+Poster"
+                # Create poster HTML
+                if poster_url:
+                    poster_html = f'<img src="{poster_url}" class="movie-poster" alt="{title} Poster">'
+                else:
+                    poster_html = '<div class="movie-placeholder">🎬</div>'
 
-                    st.markdown(
-                        f"""
-                        <a href="?movie_id={movie_id}" style="text-decoration: none; color: inherit;">
-                            <div class="movie-card">
-                                <img src="{poster_url}" alt="{title}" class="movie-poster" />
-                                <div class="movie-info">
-                                    <h3 class="movie-title">{title}</h3>
-                                    <div class="movie-meta">
-                                        <span class="release-year">{year}</span>
-                                        <span class="movie-rating">⭐ {vote_avg:.1f}</span>
-                                    </div>
-                                    <p class="movie-overview">{overview or "No overview available"}</p>
+                # Create clickable movie card with poster
+                st.markdown(f"""
+                    <a href="?movie_id={movie_id}" style="text-decoration: none; color: inherit;">
+                        <div class="movie-card">
+                            {poster_html}
+                            <div class="movie-info">
+                                <h3 class="movie-title">{title}</h3>
+                                <div class="movie-meta">
+                                    {f'<span class="release-year">📅 {int(year)}</span>' if pd.notna(year) else ''}
+                                    {f'<span class="movie-rating">⭐ {avg_rating:.1f}</span>' if avg_rating > 0 else '<span class="movie-rating">⭐ Not rated</span>'}
+                                    {f'<span class="rating-count">({int(rating_count)} ratings)</span>' if rating_count > 0 else ''}
+                                    <span style="color: #10B981; font-size: 0.85rem;">Match: {similarity:.1%}</span>
+                                </div>
+                                <div style="margin-top: 10px;">
+                                    {''.join([f'<span class="genre-badge">{g}</span>' for g in genres[:5] if g != "(no genres listed)"]) if genres else ''}
                                 </div>
                             </div>
-                        </a>
-                        """,
-                        unsafe_allow_html=True
-                    )
-            else:
-                st.warning("No complete movie entries found. Try a different search term.")
+                        </div>
+                    </a>
+                """, unsafe_allow_html=True)
+        else:
+            st.warning("No movies found matching your search. Try different keywords!")
+elif search_query:
+    st.error("Unable to search - movie data not loaded properly.")
