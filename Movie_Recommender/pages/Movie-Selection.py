@@ -594,7 +594,7 @@ st.markdown("""
     <div class="features-container">
         <div class="feature-chip">🎬 Search by title</div>
         <div class="feature-chip">🎭 Browse by genre</div>
-        <div class="feature-chip">📅 Filter by year</div>
+        <div class="feature-chip">📅 Search by year</div>
         <div class="feature-chip">🔍 NLP-powered search</div>
     </div>
 """, unsafe_allow_html=True)
