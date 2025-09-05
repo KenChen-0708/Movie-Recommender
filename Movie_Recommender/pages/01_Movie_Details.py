@@ -12,7 +12,7 @@ import random
 from collections import defaultdict
 import matplotlib.pyplot as plt
 import scipy.sparse as sp
-
+from Homepage import load_navbar
 
 def create_hybrid_evaluation_plots(metrics_dict, hybrid_scores=None):
     """Create evaluation plots specifically for hybrid algorithm"""
@@ -1590,7 +1590,7 @@ def render_cf_section(target_tmdb_id: int):
 
 
 # ---------------------------------------------------------------------------
-
+load_navbar() 
 load_custom_css()
 
 # Read query parameters
