@@ -281,27 +281,6 @@ def fetch_movie_poster_and_details(tmdb_id):
             'overview': ''
         }
 
-# def enhance_movielens_movies_with_tmdb(movies_list):
-#     """Enhance MovieLens movies with TMDB data (poster, rating, etc.)"""
-#     enhanced_movies = []
-    
-#     for movie in movies_list:
-#         if movie['source'] == 'movielens' and movie['poster_url'] is None:
-#             # Fetch TMDB data for this movie
-#             tmdb_data = fetch_movie_poster_and_details(movie['id'])
-            
-#             # Update movie with TMDB data
-#             movie['poster_url'] = tmdb_data['poster_url']
-#             movie['tmdb_rating'] = tmdb_data['tmdb_vote_average']  # Store TMDB rating separately
-            
-#             # Add fallback poster if TMDB doesn't have one
-#             if not movie['poster_url']:
-#                 movie['poster_url'] = "https://via.placeholder.com/300x450?text=No+Poster"
-        
-#         enhanced_movies.append(movie)
-    
-#     return enhanced_movies
-
 def enhance_movie_with_tmdb(movie):
     """
     Enhance a single movie with TMDB data (fetch posters, ratings, etc.)
@@ -556,23 +535,6 @@ def fetch_filtered_movies(genre_ids=None, release_date_gte=None, release_date_lt
         st.error(f"Error fetching filtered movies: {e}")
         return []
     
-# # Fetch movie details from API by TMDB ID
-# @st.cache_data
-# def fetch_movie_details_by_tmdb_id(tmdb_id):
-#     try:
-#         url = f"{API_BASE_URL}/movie/{tmdb_id}"
-#         params = {
-#             'api_key': API_KEY,
-#             'language': 'en-US',
-#             'append_to_response': 'credits'
-#         }
-#         response = requests.get(url, params=params)
-#         response.raise_for_status()
-#         return response.json()
-#     except Exception as e:
-#         st.error(f"Error fetching movie details: {e}")
-#         return None
-
 # Fetch trending movies from API
 @st.cache_data
 def fetch_trending_movies():
