@@ -618,10 +618,7 @@ def load_movie_data():
         
         # Clean title (remove year from title for display)
         df['clean_title'] = df['title'].str.replace(r'\s*\(\d{4}\)\s*$', '', regex=True)
-        
-        # Remove genre_list creation to avoid unhashable types
-        # df['genre_list'] = df['genres'].str.split('|')
-        
+                
         return df
     except FileNotFoundError:
         st.error("❌ movies.csv not found. Please check the dataset path.")
