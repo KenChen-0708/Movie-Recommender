@@ -177,9 +177,14 @@ def evaluate_single_algorithm(algorithm_type, ratings, movies, links, sample_use
                         # Extract the movie IDs for precision/recall calculation
                         rec = hybrid_recs['movieId'].tolist()
                         
-                        # Extract the hybrid scores for the histogram
-                        hybrid_scores_list = hybrid_recs['hybrid_score'].tolist()
-                        similarity_scores.extend(hybrid_scores_list)
+                        # Extract the hybrid scores for the histogram (with safety check)
+                        if 'hybrid_score' in hybrid_recs.columns:
+                            hybrid_scores_list = hybrid_recs['hybrid_score'].tolist()
+                            similarity_scores.extend(hybrid_scores_list)
+                        else:
+                            # If hybrid_score column doesn't exist, create default scores
+                            hybrid_scores_list = [0.5] * len(rec)  # Default score
+                            similarity_scores.extend(hybrid_scores_list)
                     else:
                         rec = []
                 else:
@@ -614,8 +619,8 @@ def load_movie_data():
         # Clean title (remove year from title for display)
         df['clean_title'] = df['title'].str.replace(r'\s*\(\d{4}\)\s*$', '', regex=True)
         
-        # Split genres into list
-        df['genre_list'] = df['genres'].str.split('|')
+        # Remove genre_list creation to avoid unhashable types
+        # df['genre_list'] = df['genres'].str.split('|')
         
         return df
     except FileNotFoundError:
@@ -857,6 +862,10 @@ def content_based_recommendations(target_movie_id, movies_df, tfidf_matrix, top_
         recommendations = []
         for i, (idx, score) in enumerate(similarity_scores[1:top_n+1]):  # Skip the first one (itself)
             movie_data = movies_df.iloc[idx]
+            # Handle missing genre_list
+            genres = movie_data.get('genres', '')
+            genre_list = genres.split('|') if isinstance(genres, str) else []
+
             recommendations.append({
                 'movieId': movie_data['movieId'],
                 'title': movie_data.get('clean_title', movie_data.get('title', '')),
@@ -1001,6 +1010,11 @@ def hybrid_recommendations(
         # Convert to DataFrame and sort by hybrid score
         hybrid_df = pd.DataFrame(hybrid_scores)
         hybrid_df = hybrid_df.sort_values('hybrid_score', ascending=False).head(top_n)
+        
+        if not hybrid_df.empty and 'hybrid_score' not in hybrid_df.columns:
+            # Calculate hybrid score if missing
+            hybrid_df['hybrid_score'] = (cf_weight * hybrid_df.get('cf_score', 0.0)) + \
+                                    (content_weight * hybrid_df.get('content_score', 0.0))
         
         return hybrid_df
     
