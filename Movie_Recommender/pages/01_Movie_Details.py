@@ -1889,45 +1889,54 @@ compare_slot = st.empty()
 
 # ===== Algorithm Comparison =====
 if st.button("🚀 Run Algorithm Comparison", key="compare_algorithms"):
-    with compare_slot:
-        with st.spinner("Comparing algorithms..."):
-            ratings_small, movies_small, links_small = load_ml_small()
-            content_metrics, _ = evaluate_single_algorithm("content", ratings_small, movies_small, links_small)
-            cf_metrics, _ = evaluate_single_algorithm("cf", ratings_small, movies_small, links_small)
-            hybrid_metrics, _ = evaluate_single_algorithm("hybrid", ratings_small, movies_small, links_small)
-            metrics_dict = {"Content-Based": content_metrics, "Collaborative": cf_metrics, "Hybrid": hybrid_metrics}
+    with st.spinner("Comparing algorithms..."):
+        ratings_small, movies_small, links_small = load_ml_small()
+        content_metrics, _ = evaluate_single_algorithm("content", ratings_small, movies_small, links_small)
+        cf_metrics, _ = evaluate_single_algorithm("cf", ratings_small, movies_small, links_small)
+        hybrid_metrics, _ = evaluate_single_algorithm("hybrid", ratings_small, movies_small, links_small)
+        
+        # Store results in session state
+        st.session_state["compare_metrics"] = {
+            "Content-Based": content_metrics, 
+            "Collaborative": cf_metrics, 
+            "Hybrid": hybrid_metrics
+        }
 
-            # table
-            metrics_df = pd.DataFrame(metrics_dict).T
-            st.dataframe(metrics_df.style.format("{:.3f}").highlight_max(axis=0))
+# Display comparison results if they exist in session state
+if "compare_metrics" in st.session_state:
+    metrics_dict = st.session_state["compare_metrics"]
+    
+    # Display table
+    metrics_df = pd.DataFrame(metrics_dict).T
+    st.dataframe(metrics_df.style.format("{:.3f}").highlight_max(axis=0))
 
-            # figure
-            fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15, 4))
-            algorithms = list(metrics_dict.keys())
+    # Display figure
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15, 4))
+    algorithms = list(metrics_dict.keys())
 
-            precision_values = [metrics_dict[a]['Precision@K'] for a in algorithms]
-            m = max(precision_values) if precision_values else 1.0; y = m * 0.15
-            ax1.bar(algorithms, precision_values, color=['#FF6B6B', '#4ECDC4', '#45B7D1'])
-            ax1.set_title('Precision@K Comparison'); ax1.set_ylabel('Precision@K')
-            ax1.set_ylim(0, m + y); ax1.tick_params(axis='x', rotation=45)
-            for i, v in enumerate(precision_values): ax1.text(i, v + (y * 0.1), f'{v:.3f}', ha='center', va='bottom', fontsize=10)
+    precision_values = [metrics_dict[a]['Precision@K'] for a in algorithms]
+    m = max(precision_values) if precision_values else 1.0; y = m * 0.15
+    ax1.bar(algorithms, precision_values, color=['#FF6B6B', '#4ECDC4', '#45B7D1'])
+    ax1.set_title('Precision@K Comparison'); ax1.set_ylabel('Precision@K')
+    ax1.set_ylim(0, m + y); ax1.tick_params(axis='x', rotation=45)
+    for i, v in enumerate(precision_values): ax1.text(i, v + (y * 0.1), f'{v:.3f}', ha='center', va='bottom', fontsize=10)
 
-            recall_values = [metrics_dict[a]['Recall@K'] for a in algorithms]
-            m = max(recall_values) if recall_values else 1.0; y = m * 0.15
-            ax2.bar(algorithms, recall_values, color=['#FF6B6B', '#4ECDC4', '#45B7D1'])
-            ax2.set_title('Recall@K Comparison'); ax2.set_ylabel('Recall@K')
-            ax2.set_ylim(0, m + y); ax2.tick_params(axis='x', rotation=45)
-            for i, v in enumerate(recall_values): ax2.text(i, v + (y * 0.1), f'{v:.3f}', ha='center', va='bottom', fontsize=10)
+    recall_values = [metrics_dict[a]['Recall@K'] for a in algorithms]
+    m = max(recall_values) if recall_values else 1.0; y = m * 0.15
+    ax2.bar(algorithms, recall_values, color=['#FF6B6B', '#4ECDC4', '#45B7D1'])
+    ax2.set_title('Recall@K Comparison'); ax2.set_ylabel('Recall@K')
+    ax2.set_ylim(0, m + y); ax2.tick_params(axis='x', rotation=45)
+    for i, v in enumerate(recall_values): ax2.text(i, v + (y * 0.1), f'{v:.3f}', ha='center', va='bottom', fontsize=10)
 
-            f1_values = [metrics_dict[a]['F1@K'] for a in algorithms]
-            m = max(f1_values) if f1_values else 1.0; y = m * 0.15
-            ax3.bar(algorithms, f1_values, color=['#FF6B6B', '#4ECDC4', '#45B7D1'])
-            ax3.set_title('F1@K Comparison'); ax3.set_ylabel('F1@K')
-            ax3.set_ylim(0, m + y); ax3.tick_params(axis='x', rotation=45)
-            for i, v in enumerate(f1_values): ax3.text(i, v + (y * 0.1), f'{v:.3f}', ha='center', va='bottom', fontsize=10)
+    f1_values = [metrics_dict[a]['F1@K'] for a in algorithms]
+    m = max(f1_values) if f1_values else 1.0; y = m * 0.15
+    ax3.bar(algorithms, f1_values, color=['#FF6B6B', '#4ECDC4', '#45B7D1'])
+    ax3.set_title('F1@K Comparison'); ax3.set_ylabel('F1@K')
+    ax3.set_ylim(0, m + y); ax3.tick_params(axis='x', rotation=45)
+    for i, v in enumerate(f1_values): ax3.text(i, v + (y * 0.1), f'{v:.3f}', ha='center', va='bottom', fontsize=10)
 
-            plt.tight_layout()
-            st.session_state["figs"]["alg_compare_fig"] = fig
+    plt.tight_layout()
+    st.pyplot(fig)
 
 
 # show graph below the button
@@ -1940,29 +1949,37 @@ st.markdown("---")
 st.header("📈 Rating Prediction Evaluation")
 st.caption("Evaluate rating prediction accuracy using RMSE and MAE")
 
-rmse_slot = st.empty()
-
 # ===== RMSE/MAE evaluation =====
 if st.button("📊 Run RMSE/MAE Evaluation", key="eval_rmse"):
-    with rmse_slot:
-        with st.spinner("Evaluating rating prediction..."):
-            ratings_small, movies_small, links_small = load_ml_small()
-            rmse_res = evaluate_rmse_baseline(ratings_small)
+    with st.spinner("Evaluating rating prediction..."):
+        ratings_small, movies_small, links_small = load_ml_small()
+        rmse_res = evaluate_rmse_baseline(ratings_small)
+        
+        # Store results in session state
+        st.session_state["rmse_results"] = rmse_res
 
-            # table
-            rmse_df = pd.DataFrame({"RMSE": [rmse_res.get("RMSE", 0.0)], "MAE": [rmse_res.get("MAE", 0.0)]})
-            st.dataframe(rmse_df.style.format("{:.4f}"))
+# Display RMSE/MAE results if they exist in session state
+if "rmse_results" in st.session_state:
+    rmse_res = st.session_state["rmse_results"]
+    
+    # Display table
+    rmse_df = pd.DataFrame({"RMSE": [rmse_res.get("RMSE", 0.0)], "MAE": [rmse_res.get("MAE", 0.0)]})
+    st.dataframe(rmse_df.style.format("{:.4f}"))
 
-            # figure (narrower width)
-            fig, ax = plt.subplots(figsize=(4, 3))
-            metrics = ['RMSE', 'MAE']
-            values = [rmse_res.get("RMSE", 0.0), rmse_res.get("MAE", 0.0)]
-            m = max(values) if values else 1.0; y = m * 0.15
-            ax.bar(metrics, values, color=['#FF6B6B', '#4ECDC4'])
-            ax.set_title('Rating Prediction Error'); ax.set_ylabel('Error'); ax.set_ylim(0, m + y)
-            for i, v in enumerate(values): ax.text(i, v + (y * 0.1), f'{v:.4f}', ha='center', va='bottom', fontsize=10)
-            plt.tight_layout()
-            st.session_state["figs"]["rmse_fig"] = fig
+    # Display figure (narrower width)
+    fig, ax = plt.subplots(figsize=(8, 3.5))
+    metrics = ['RMSE', 'MAE']
+    values = [rmse_res.get("RMSE", 0.0), rmse_res.get("MAE", 0.0)]
+    m = max(values) if values else 1.0
+    y = m * 0.15
+    ax.bar(metrics, values, color=['#FF6B6B', '#4ECDC4'])
+    ax.set_title('Rating Prediction Error')
+    ax.set_ylabel('Error')
+    ax.set_ylim(0, m + y)
+    for i, v in enumerate(values):
+        ax.text(i, v + (y * 0.1), f'{v:.4f}', ha='center', va='bottom', fontsize=10)
+    plt.tight_layout()
+    st.pyplot(fig, use_container_width=False)
 
 
 # show graph below the button
