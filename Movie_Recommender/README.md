@@ -2,43 +2,33 @@
 
 ## Installation
 
-1. Clone this repository to your local machine:
+You can set up the project in two different ways: using a Conda environment or a Windows environment.
 
-   ```bash
-   git clone https://github.com/yourusername/movie-recommendation-app.git
-   ```
+### Method 1: Conda Environment
+
+1. Create a new conda environment with Python 3.12.11:
+   conda create -n movie_env python=3.12.11
+   conda activate movie_env
 
 2. Navigate to the project directory:
+   cd Movie_Recommender
 
-   ```bash
-   cd movie-recommendation-app
-   ```
-
-3. Install the required Python packages:
-
-   ```bash
+3. Install required Python packages:
    pip install -r requirements.txt
-   ```
 
-## Usage
-
-1. Run the Streamlit app:
-
-   ```bash
+4. Run the Streamlit app inside the conda environment:
    streamlit run Homepage.py
-   ```
 
-   ```window
+
+### Method 2: Windows Environment
+
+1. Make sure you have Python 3.12.11 installed on your system.
+
+2. Navigate to the project directory:
+   cd Movie_Recommender
+
+3. Install required Python packages:
+   pip install -r requirements.txt
+
+4. Run the Streamlit app using Python directly:
    python -m streamlit run Homepage.py
-
-2. Open your web browser and visit `http://localhost:8501` to access the Movie Recommendation App.
-
-## Dependencies
-
-The project uses the following Python libraries:
-
-- [Streamlit](https://streamlit.io/): For creating the web application interface.
-- [Pandas](https://pandas.pydata.org/): For data manipulation and analysis.
-- [Requests](https://docs.python-requests.org/en/latest/): For making API requests.
-- [Scikit-learn (Sklearn)](https://scikit-learn.org/stable/): For machine learning and recommendation algorithms.
-- [Plotly](https://plotly.com/): For interactive data visualization.
