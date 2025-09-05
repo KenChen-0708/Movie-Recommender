@@ -6,111 +6,11 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 import re
 import requests
+from Homepage import load_navbar
 
 # TMDB API Configuration
 API_KEY = "6272a18b79461f7987d2f1047b3d1198"
 API_BASE_URL = "https://api.themoviedb.org/3"
-
-# Navigation bar function
-def load_navbar():
-    st.markdown("""
-    <style>
-    /* App background */
-    html, body, .stApp {
-        background: linear-gradient(135deg, #1e1e2f, #2e2e4e);
-        color: white;
-        font-family: 'Segoe UI', sans-serif;
-    }
-
-    /* Navigation bar container */
-    .navbar {
-        background: linear-gradient(90deg, #2e2f47, #3c3e5f);
-        padding: 1rem 2rem;
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        border-radius: 12px;
-        box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
-        margin-bottom: 2rem;
-        position: sticky;
-        top: 0;
-        z-index: 999;
-    }
-
-    /* Logo styling */
-    .navbar-logo a {
-        font-size: 1.7rem;
-        font-weight: 700;
-        color: white;
-        text-decoration: none;
-        transition: all 0.3s ease;
-        display: flex;
-        align-items: center;
-        gap: 10px;
-    }
-
-    .navbar-logo a:hover {
-        color: #d8b4fe;
-        transform: scale(1.03);
-        text-shadow: 0 0 8px rgba(216, 180, 254, 0.4);
-    }
-
-    /* Navigation links */
-    .navbar-links {
-        display: flex;
-        gap: 1rem;
-    }
-
-    .navbar-links a {
-        color: white;
-        text-decoration: none;
-        padding: 0.5rem 1rem;
-        border-radius: 8px;
-        font-weight: 600;
-        display: flex;
-        align-items: center;
-        gap: 6px;
-        transition: all 0.3s ease;
-    }
-
-    .navbar-links a:hover {
-        background-color: rgba(255, 255, 255, 0.07);
-        transform: translateY(-2px);
-        color: #d8b4fe;
-        text-shadow: 0 0 8px rgba(216, 180, 254, 0.5);
-    }
-
-    /* Active link */
-    .navbar-links a.active {
-        background-color: rgba(216, 180, 254, 0.15);
-        color: #d8b4fe;
-    }
-
-    /* Responsive behavior */
-    @media (max-width: 768px) {
-        .navbar {
-            flex-direction: column;
-            align-items: flex-start;
-            gap: 0.8rem;
-        }
-
-        .navbar-links {
-            flex-direction: column;
-            align-items: flex-start;
-        }
-    }
-    </style>
-
-    <div class="navbar">
-        <div class="navbar-logo">
-            <a href="/" target="_self">🎬 CineSearch Pro</a>
-        </div>
-        <div class="navbar-links">
-            <a href="/" target="_self">🏠 Home</a>
-            <a href="/Movie-Selection" target="_self" class="active">🔍 Movie Search</a>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
 
 # TMDB API Functions
 @st.cache_data
@@ -172,9 +72,9 @@ def load_movie_data():
         # Clean title (remove year from title for display)
         df['clean_title'] = df['title'].str.replace(r'\s*\(\d{4}\)\s*$', '', regex=True)
         
-        # Split genres into list
-        df['genre_list'] = df['genres'].str.split('|')
-        
+        # Create genres as a string instead of a list to avoid hashing issues
+        df['genres_str'] = df['genres'].str.replace('|', ' ')
+                
         return df
     except FileNotFoundError:
         st.error("❌ movies.csv not found. Please check the dataset path.")
@@ -223,6 +123,9 @@ def load_ratings_with_stats():
 
 # Load data
 movies_df = load_movie_data()
+# Create genre_list as a string representation to avoid hashing issues
+movies_df['genre_list'] = movies_df['genres'].str.split('|').apply(lambda x: ', '.join(x))
+
 tags_df, movie_tags_df = load_tags_data()
 ratings_df, rating_stats_df = load_ratings_with_stats()
 
@@ -251,7 +154,7 @@ def get_search_vectorizer_and_matrix(dataframe):
     dataframe['search_blob'] = (
         dataframe['title'] + ' ' + 
         dataframe['clean_title'] + ' ' + 
-        dataframe['genres'].str.replace('|', ' ')
+        dataframe['genres_str']
     )
     
     vectorizer = TfidfVectorizer(stop_words='english', max_features=5000)
@@ -599,9 +502,9 @@ st.markdown("""
     </div>
 """, unsafe_allow_html=True)
 
-# Search box
+# Search box with proper label to avoid accessibility warning
 search_query = st.text_input(
-    "",
+    "Search movies",
     placeholder="Search by movie title, genre, or keywords...",
     key="search_input",
     label_visibility="collapsed"
@@ -631,7 +534,7 @@ if search_query and not movies_df.empty:
                 year = result.get('year', '')
                 avg_rating = result.get('avg_rating', 0)
                 rating_count = result.get('rating_count', 0)
-                genres = result.get('genre_list', [])
+                genres = result.get('genre_list', '')
                 similarity = result.get('similarity', 0)
 
                 # Get poster URL from TMDB
@@ -657,7 +560,7 @@ if search_query and not movies_df.empty:
                                     <span style="color: #10B981; font-size: 0.85rem;">Match: {similarity:.1%}</span>
                                 </div>
                                 <div style="margin-top: 10px;">
-                                    {''.join([f'<span class="genre-badge">{g}</span>' for g in genres[:5] if g != "(no genres listed)"]) if genres else ''}
+                                    {' '.join([f'<span class="genre-badge">{g}</span>' for g in genres.split(', ') if g and g != "(no genres listed)"]) if genres else ''}
                                 </div>
                             </div>
                         </div>
