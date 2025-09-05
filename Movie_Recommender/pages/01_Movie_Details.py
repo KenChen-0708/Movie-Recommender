@@ -7,12 +7,553 @@ import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.preprocessing import MultiLabelBinarizer
+import math
+import random
+from collections import defaultdict
+import matplotlib.pyplot as plt
+import scipy.sparse as sp
+import matplotlib.pyplot as plt
+
+
+def create_hybrid_evaluation_plots(metrics_dict, hybrid_scores=None):
+    """Create evaluation plots specifically for hybrid algorithm"""
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+    
+    # Plot 1: Precision, Recall, F1 for hybrid
+    metrics = ['Precision@K', 'Recall@K', 'F1@K']
+    values = [metrics_dict["Hybrid"][metric] for metric in metrics]
+    
+    colors = ['#FF6B6B', '#4ECDC4', '#45B7D1']
+    bars = ax1.bar(metrics, values, color=colors)
+    ax1.set_title('Hybrid Algorithm Performance Metrics')
+    ax1.set_ylabel('Score')
+    
+    # Calculate appropriate y-axis limits
+    max_value = max(values) if values else 1.0
+    y_margin = max_value * 0.15  # 15% margin
+    ax1.set_ylim(0, max_value + y_margin)
+    
+    # Add value labels on bars with adjusted position
+    for i, v in enumerate(values):
+        ax1.text(i, v + (y_margin * 0.1), f'{v:.3f}', ha='center', va='bottom', fontsize=10)
+    
+    # Plot 2: Hybrid score distribution
+    if hybrid_scores and len(hybrid_scores) > 0:
+        ax2.hist(hybrid_scores, bins=20, color='#6A0DAD', alpha=0.7, edgecolor='black')
+        ax2.set_title('Hybrid Score Distribution')
+        ax2.set_xlabel('Hybrid Score')
+        ax2.set_ylabel('Frequency')
+        
+        # Calculate appropriate position for mean line
+        mean_val = np.mean(hybrid_scores)
+        ax2.axvline(mean_val, color='red', linestyle='dashed', linewidth=1, 
+                   label=f'Mean: {mean_val:.3f}')
+        ax2.legend()
+    else:
+        # Fallback if no hybrid scores available
+        ax2.text(0.5, 0.5, 'No hybrid scores available', 
+                horizontalalignment='center', verticalalignment='center',
+                transform=ax2.transAxes, fontsize=12)
+        ax2.set_title('Hybrid Score Distribution')
+    
+    plt.tight_layout()
+    return fig
+
+
+# Add this function to create evaluation plots
+def create_evaluation_plots(metrics_dict, algorithm_name, similarity_scores=None):
+    """Create evaluation plots for a specific algorithm"""
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+    
+    # Plot 1: Precision, Recall, F1
+    metrics = ['Precision@K', 'Recall@K', 'F1@K']
+    values = [metrics_dict[algorithm_name][metric] for metric in metrics]
+    
+    colors = ['#FF6B6B', '#4ECDC4', '#45B7D1']
+    bars = ax1.bar(metrics, values, color=colors)
+    ax1.set_title(f'{algorithm_name} Performance Metrics')
+    ax1.set_ylabel('Score')
+    
+    # Calculate appropriate y-axis limits
+    max_value = max(values) if values else 1.0
+    y_margin = max_value * 0.15  # 15% margin
+    ax1.set_ylim(0, max_value + y_margin)
+    
+    # Add value labels on bars with adjusted position
+    for i, v in enumerate(values):
+        ax1.text(i, v + (y_margin * 0.1), f'{v:.3f}', ha='center', va='bottom', fontsize=10)
+    
+    # Plot 2: Similarity distribution (if available)
+    if similarity_scores and len(similarity_scores) > 0:
+        ax2.hist(similarity_scores, bins=20, color='#6A0DAD', alpha=0.7, edgecolor='black')
+        ax2.set_title('Similarity Score Distribution')
+        ax2.set_xlabel('Similarity Score')
+        ax2.set_ylabel('Frequency')
+        
+        # Calculate appropriate position for mean line
+        mean_val = np.mean(similarity_scores)
+        ax2.axvline(mean_val, color='red', linestyle='dashed', linewidth=1, 
+                   label=f'Mean: {mean_val:.3f}')
+        ax2.legend()
+    
+    plt.tight_layout()
+    return fig
+
+# Add this function to evaluate a specific algorithm
+@st.cache_data
+def evaluate_single_algorithm(algorithm_type, ratings, movies, links, sample_users=150, top_k=10):
+    """
+    Evaluate a single algorithm (content, cf, or hybrid)
+    Returns metrics and similarity scores if available
+    """
+    seeds = _build_movie_seed_map(ratings, min_pos=3)
+    if len(seeds) > sample_users:
+        random.shuffle(seeds)
+        seeds = seeds[:sample_users]
+    
+    user_pos = _build_user_positives(ratings)
+    results = {"p": [], "r": [], "f1": []}
+    similarity_scores = []  # To store similarity scores if available
+    
+    for uid, seed_mid, held_mid in seeds:
+        relevant = set(user_pos[uid]) - {seed_mid}
+        if not relevant:
+            continue
+            
+        if algorithm_type == "content":
+            rec = _recommend_content_seed(seed_mid, top_n=top_k)
+            # For content-based, we can get similarity scores
+            try:
+                if not movies_df.empty:
+                    seed_idx = movies_df.index[movies_df['movieId'] == seed_mid].tolist()
+                    if seed_idx:
+                        seed_idx = seed_idx[0]
+                        # Get similarity scores for recommendations
+                        for rec_mid in rec:
+                            rec_idx = movies_df.index[movies_df['movieId'] == rec_mid].tolist()
+                            if rec_idx:
+                                rec_idx = rec_idx[0]
+                                sim = cosine_similarity(rec_tfidf_matrix[seed_idx], rec_tfidf_matrix[rec_idx])[0][0]
+                                similarity_scores.append(sim)
+            except:
+                pass
+                
+        elif algorithm_type == "cf":
+            rec = _recommend_cf_seed(seed_mid, ratings, min_overlap=15, top_n=top_k)
+            # For CF, we can get similarity scores from the CF function
+            try:
+                R_csr, B_csr, mlid_to_row, row_to_mlid, norms = build_item_user_sparse(ratings)
+                seed_row = mlid_to_row.get(int(seed_mid))
+                if seed_row is not None:
+                    # Get similarity scores for recommendations
+                    for rec_mid in rec:
+                        rec_row = mlid_to_row.get(int(rec_mid))
+                        if rec_row is not None:
+                            numer = (R_csr[seed_row] @ R_csr[rec_row].T).toarray()[0][0]
+                            denom = norms[seed_row] * norms[rec_row]
+                            if denom != 0:
+                                sim = numer / denom
+                                similarity_scores.append(sim)
+            except:
+                pass
+                
+        elif algorithm_type == "hybrid":
+            # For hybrid, we need to get the actual hybrid scores
+            try:
+                # Get the TMDB ID for the seed movie
+                seed_tmdb_row = links[links["movieId"] == seed_mid]
+                if not seed_tmdb_row.empty:
+                    seed_tmdb_id = int(seed_tmdb_row.iloc[0]["tmdbId"])
+                    
+                    # Get hybrid recommendations with scores
+                    hybrid_recs = hybrid_recommendations(
+                        target_tmdb_id=seed_tmdb_id,
+                        ratings=ratings,
+                        movies=movies,
+                        links=links,
+                        top_n=top_k
+                    )
+                    
+                    if not hybrid_recs.empty:
+                        # Extract the movie IDs for precision/recall calculation
+                        rec = hybrid_recs['movieId'].tolist()
+                        
+                        # Extract the hybrid scores for the histogram
+                        hybrid_scores_list = hybrid_recs['hybrid_score'].tolist()
+                        similarity_scores.extend(hybrid_scores_list)
+                    else:
+                        rec = []
+                else:
+                    rec = []
+            except Exception as e:
+                print(f"Error getting hybrid recommendations: {e}")
+                rec = []
+        
+        p, r, f1 = _precision_recall_f1(rec, relevant)
+        results["p"].append(p)
+        results["r"].append(r)
+        results["f1"].append(f1)
+    
+    # Calculate averages
+    def avg(lst): 
+        return float(np.mean(lst)) if lst else 0.0
+    
+    metrics = {
+        "Precision@K": avg(results["p"]),
+        "Recall@K": avg(results["r"]),
+        "F1@K": avg(results["f1"])
+    }
+    
+    return metrics, similarity_scores
+
+@st.cache_data
+def evaluate_rmse_baseline(ratings_df: pd.DataFrame, test_size=0.2, random_state=42):
+    """
+    Pure-Python baseline predictor: r_hat(u,i) = mu + b_u + b_i
+    (global mean + user bias + item bias). No external deps.
+    Returns RMSE/MAE quickly and reliably.
+    """
+    # Shuffle & split
+    df = ratings_df.sample(frac=1.0, random_state=random_state).reset_index(drop=True)
+    split = int(len(df) * (1 - test_size))
+    train = df.iloc[:split]
+    test  = df.iloc[split:]
+
+    mu = float(train["rating"].mean())
+    bu = train.groupby("userId")["rating"].mean() - mu
+    bi = train.groupby("movieId")["rating"].mean() - mu
+
+    # Predict baseline
+    # (vectorized via map; fallback to 0 if unseen user/movie in test)
+    pred = mu \
+        + test["userId"].map(bu).fillna(0.0).astype(float) \
+        + test["movieId"].map(bi).fillna(0.0).astype(float)
+
+    # Clip to MovieLens scale
+    pred = np.clip(pred.values, 0.5, 5.0)
+    true = test["rating"].values.astype(float)
+
+    rmse = float(np.sqrt(np.mean((true - pred) ** 2)))
+    mae  = float(np.mean(np.abs(true - pred)))
+    return {"RMSE": rmse, "MAE": mae, "model": "Baseline (μ + bᵤ + bᵢ)"}
+
+
+def _plot_bar(ax, labels, values, title, ylabel):
+    """Simple labeled bar chart for metrics (no custom colors/styles)."""
+    # Coerce to floats and handle empty/None
+    vals = [float(v) if v is not None else 0.0 for v in values]
+    ax.bar(labels, vals)
+    ax.set_title(title)
+    ax.set_ylabel(ylabel)
+    
+    # Calculate appropriate y-axis limits
+    max_value = max(vals) if vals else 1.0
+    y_margin = max_value * 0.15  # 15% margin
+    ax.set_ylim(0, max_value + y_margin)
+    
+    # value labels above bars with adjusted position
+    for i, v in enumerate(vals):
+        ax.text(i, v + (y_margin * 0.1), f"{v:.3f}",
+                ha="center", va="bottom", fontsize=9)
+
+@st.cache_resource
+def build_item_user_sparse(ratings: pd.DataFrame):
+    """
+    Build cached sparse matrices for fast item–item similarity:
+      - R_csr: (n_items x n_users) user-mean centered ratings
+      - B_csr: binary co-rating matrix (same shape) for fast overlap counts
+      - mlid_to_row / row_to_mlid: id maps
+      - norms: L2 norms per item row
+    """
+    # Map users and movies to contiguous indices
+    user_ids = ratings["userId"].astype(int).unique()
+    movie_ids = ratings["movieId"].astype(int).unique()
+    user_ids.sort()
+    movie_ids.sort()
+
+    uid_to_col = {u: i for i, u in enumerate(user_ids)}
+    mlid_to_row = {m: i for i, m in enumerate(movie_ids)}
+    row_to_mlid = np.array(movie_ids)
+
+    # User mean-centering for Pearson-like cosine
+    user_means = ratings.groupby("userId")["rating"].mean()
+
+    rows, cols, data = [], [], []
+    b_rows, b_cols, b_data = [], [], []
+
+    for _, r in ratings.iterrows():
+        u = int(r.userId); m = int(r.movieId); rt = float(r.rating)
+        if u in uid_to_col and m in mlid_to_row:
+            rows.append(mlid_to_row[m])
+            cols.append(uid_to_col[u])
+            data.append(rt - float(user_means.loc[u]))
+
+            b_rows.append(mlid_to_row[m])
+            b_cols.append(uid_to_col[u])
+            b_data.append(1.0)
+
+    n_items = len(movie_ids)
+    n_users = len(user_ids)
+    R_csr = sp.csr_matrix((data, (rows, cols)), shape=(n_items, n_users))
+    B_csr = sp.csr_matrix((b_data, (b_rows, b_cols)), shape=(n_items, n_users))
+
+    # L2 norms per item row (avoid div by zero)
+    norms = np.sqrt(R_csr.multiply(R_csr).sum(axis=1)).A1
+    norms[norms == 0.0] = 1e-12
+
+    return R_csr, B_csr, mlid_to_row, row_to_mlid, norms
+
+# ---- Helper: Positive threshold & top-K
+POS_THRESHOLD = 4.0
+TOP_K = 10
+
+def _safe_int(x, default=None):
+    try:
+        return int(x)
+    except Exception:
+        return default
+
+@st.cache_data
+def _build_user_positives(ratings_df: pd.DataFrame, pos_threshold: float = POS_THRESHOLD):
+    """Return dict: userId -> set(movieId) with ratings >= threshold."""
+    pos = ratings_df.loc[ratings_df["rating"] >= pos_threshold, ["userId", "movieId"]]
+    user_pos = defaultdict(set)
+    for _, r in pos.iterrows():
+        user_pos[int(r.userId)].add(int(r.movieId))
+    return user_pos
+
+@st.cache_data
+def _build_movie_seed_map(ratings_df: pd.DataFrame, min_pos=3):
+    """
+    For each user, pick a 'seed' positive movie (to simulate user context) and
+    a 'held-out' positive movie to test hit@K.
+    Returns list of tuples: (userId, seed_ml_movieId, heldout_ml_movieId).
+    """
+    user_pos = _build_user_positives(ratings_df)
+    seeds = []
+    for uid, items in user_pos.items():
+        if len(items) >= max(min_pos, 2):
+            items_list = list(items)
+            random.shuffle(items_list)
+            seed = items_list[0]
+            held = items_list[1]
+            seeds.append((uid, seed, held))
+    return seeds
+
+@st.cache_data
+def _ml_to_tmdb_map(links_df: pd.DataFrame):
+    to_tmdb = {}
+    to_ml = {}
+    for _, r in links_df.iterrows():
+        ml_id = _safe_int(r.movieId)
+        tmdb_id = _safe_int(r.tmdbId)
+        if ml_id and tmdb_id:
+            to_tmdb[ml_id] = tmdb_id
+            to_ml[tmdb_id] = ml_id
+    return to_tmdb, to_ml
+
+def _precision_recall_f1(recommended: list[int], relevant: set[int]):
+    if not recommended:
+        return 0.0, 0.0, 0.0
+    rec_set = set(recommended)
+    hit = len(rec_set & relevant)
+    precision = hit / len(recommended)
+    recall = hit / len(relevant) if relevant else 0.0
+    f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
+    return precision, recall, f1
+
+def _recommend_content_seed(seed_ml_movie_id: int, top_n=TOP_K):
+    """Use your content-based pipeline (TF-IDF from movies_df) with a seed ML movie."""
+    if movies_df.empty:
+        return []
+    try:
+        if 'movieId' not in movies_df.columns:
+            return []
+        # locate seed index
+        idx_list = movies_df.index[movies_df['movieId'] == seed_ml_movie_id].tolist()
+        if not idx_list:
+            return []
+        seed_idx = idx_list[0]
+
+        # similarity vector
+        sims = list(enumerate(cosine_similarity(rec_tfidf_matrix[seed_idx], rec_tfidf_matrix).flatten()))
+        sims = sorted(sims, key=lambda x: x[1], reverse=True)
+
+        # top-N movieIds (skip itself)
+        out = []
+        for i, score in sims[1: top_n + 50]:  # take a bit more then dedup
+            mid = int(movies_df.iloc[i]['movieId'])
+            if mid != seed_ml_movie_id:
+                out.append(mid)
+            if len(out) >= top_n:
+                break
+        return out
+    except Exception:
+        return []
+
+def _recommend_cf_seed(seed_ml_movie_id: int, ratings: pd.DataFrame, min_overlap=20, top_n=TOP_K):
+    """
+    FAST item–item CF using sparse cosine similarity on user-mean–centered ratings.
+    Respects min_overlap via a binary co-rating matrix.
+    """
+    R_csr, B_csr, mlid_to_row, row_to_mlid, norms = build_item_user_sparse(ratings)
+    seed_row = mlid_to_row.get(int(seed_ml_movie_id))
+    if seed_row is None:
+        return []
+
+    # Cosine similarity: (R[i] @ R.T) / (||R[i]|| * ||R||)
+    # 1 x n_items vector
+    numer = (R_csr[seed_row] @ R_csr.T).toarray().ravel()
+    denom = norms[seed_row] * norms
+    sims = np.divide(numer, denom, out=np.zeros_like(numer), where=(denom != 0))
+
+    # Co-rater overlap via binary matrix
+    overlaps = (B_csr[seed_row] @ B_csr.T).toarray().ravel()
+
+    # Remove self
+    sims[seed_row] = -np.inf
+
+    # Filter by min_overlap
+    valid = np.where(overlaps >= min_overlap)[0]
+    if valid.size == 0:
+        # fall back: no overlap filter, just take highest sims excluding self
+        valid = np.argsort(-sims)[:top_n * 5]
+
+    # Top-N among valid
+    top_idx = valid[np.argsort(-sims[valid])][:top_n]
+    top_ml_ids = [int(row_to_mlid[i]) for i in top_idx if i != seed_row]
+    return top_ml_ids[:top_n]
+
+
+def _recommend_hybrid_seed(seed_ml_movie_id: int, ratings: pd.DataFrame, movies: pd.DataFrame, links: pd.DataFrame,
+                           cf_weight=0.6, content_weight=0.4, top_n=TOP_K):
+    """
+    Combine CF + Content with normalized ranks for a seed ML movie.
+    """
+    # content list (ML ids)
+    content_list = _recommend_content_seed(seed_ml_movie_id, top_n=top_n*5)
+    # cf list (ML ids) via Pearson
+    cf_list = _recommend_cf_seed(seed_ml_movie_id, ratings, min_overlap=10, top_n=top_n*5)
+
+    if not content_list and not cf_list:
+        return []
+
+    # Rank normalization: higher rank => better score (invert position)
+    def rank_scores(lst):
+        scores = {}
+        n = len(lst)
+        for pos, mid in enumerate(lst):
+            scores[mid] = (n - pos) / n  # 1.0 (best) -> small
+        return scores
+
+    c_scores = rank_scores(content_list)
+    f_scores = rank_scores(cf_list)
+
+    # combine
+    all_ids = set(content_list) | set(cf_list)
+    merged = []
+    for mid in all_ids:
+        c = c_scores.get(mid, 0.0)
+        f = f_scores.get(mid, 0.0)
+        score = cf_weight * f + content_weight * c
+        merged.append((mid, score))
+    merged.sort(key=lambda x: x[1], reverse=True)
+    return [m for m, _ in merged[:top_n]]
+
+@st.cache_data
+def evaluate_precision_recall_f1_all(ratings, movies, links, sample_users=150, top_k=TOP_K, seed_min_pos=3, random_state=42):
+    """
+    For a subset of users with >= seed_min_pos positives:
+      - pick one positive as seed, one as held-out relevant target (+ keep all positives as 'relevant set')
+      - generate top-K via each method from the seed movie
+      - compute Precision/Recall/F1 vs user's positive set (excluding the seed)
+    Returns dict of averaged metrics.
+    """
+    random.seed(random_state)
+    seeds = _build_movie_seed_map(ratings, min_pos=seed_min_pos)
+    if len(seeds) > sample_users:
+        random.shuffle(seeds)
+        seeds = seeds[:sample_users]
+
+    user_pos = _build_user_positives(ratings)
+    results = {
+        "content": {"p": [], "r": [], "f1": []},
+        "cf": {"p": [], "r": [], "f1": []},
+        "hybrid": {"p": [], "r": [], "f1": []},
+    }
+
+    for uid, seed_mid, held_mid in seeds:
+        relevant = set(user_pos[uid]) - {seed_mid}  # all other positives are relevant
+        if not relevant:
+            continue
+
+        # Content
+        rec_c = _recommend_content_seed(seed_mid, top_n=top_k)
+        p, r, f1 = _precision_recall_f1(rec_c, relevant)
+        results["content"]["p"].append(p)
+        results["content"]["r"].append(r)
+        results["content"]["f1"].append(f1)
+
+        # CF
+        rec_f = _recommend_cf_seed(seed_mid, ratings, min_overlap=15, top_n=top_k)
+        p, r, f1 = _precision_recall_f1(rec_f, relevant)
+        results["cf"]["p"].append(p)
+        results["cf"]["r"].append(r)
+        results["cf"]["f1"].append(f1)
+
+        # Hybrid
+        rec_h = _recommend_hybrid_seed(seed_mid, ratings, movies, links, cf_weight=0.6, content_weight=0.4, top_n=top_k)
+        p, r, f1 = _precision_recall_f1(rec_h, relevant)
+        results["hybrid"]["p"].append(p)
+        results["hybrid"]["r"].append(r)
+        results["hybrid"]["f1"].append(f1)
+
+    # average
+    def avg(lst): 
+        return float(np.mean(lst)) if lst else 0.0
+
+    summary = {
+        "Content-Based": {
+            "Precision@K": avg(results["content"]["p"]),
+            "Recall@K": avg(results["content"]["r"]),
+            "F1@K": avg(results["content"]["f1"])
+        },
+        "Collaborative": {
+            "Precision@K": avg(results["cf"]["p"]),
+            "Recall@K": avg(results["cf"]["r"]),
+            "F1@K": avg(results["cf"]["f1"])
+        },
+        "Hybrid": {
+            "Precision@K": avg(results["hybrid"]["p"]),
+            "Recall@K": avg(results["hybrid"]["r"]),
+            "F1@K": avg(results["hybrid"]["f1"])
+        }
+    }
+    return summary
+
+
 
 # TMDB API Configuration
 API_KEY = "6272a18b79461f7987d2f1047b3d1198"
 API_BASE_URL = "https://api.themoviedb.org/3"
 
 st.set_page_config(page_title="Movie Details", page_icon="🎬", layout="wide", initial_sidebar_state="collapsed")
+
+# Persist graphs + rendered HTML across reruns
+if "figs" not in st.session_state:
+    st.session_state["figs"] = {}
+
+def _persist_and_show(slot, key, fig):
+    st.session_state["figs"][key] = fig
+    slot.pyplot(fig)
+
+# cache for rendered recommendation sections (avoid reloading movies on button clicks)
+if "html_cache" not in st.session_state:
+    st.session_state["html_cache"] = {
+        "content": {},   # key: ml_movie_id -> HTML string
+        "cf": {},        # key: tmdb_id -> HTML string
+        "hybrid": {}     # key: tmdb_id -> HTML string
+    }
 
 # ----- TMDB API Functions -----
 @st.cache_data
@@ -286,51 +827,52 @@ def build_content_features(movies: pd.DataFrame, links: pd.DataFrame):
     
     return features_df, genre_df
 
-@st.cache_data
-def content_based_recommendations(
-    target_tmdb_id: int,
-    movies: pd.DataFrame,
-    links: pd.DataFrame,
-    top_n: int = 12
-):
+def content_based_recommendations(target_movie_id, movies_df, tfidf_matrix, top_n=10):
     """
-    Generate content-based recommendations using genre similarity.
-    Uses cosine similarity on genre vectors.
+    Generate content-based recommendations for a given movie ID.
+    
+    Args:
+        target_movie_id: MovieLens movie ID of the target movie
+        movies_df: DataFrame containing movie information
+        tfidf_matrix: Precomputed TF-IDF matrix for all movies
+        top_n: Number of recommendations to return
+    
+    Returns:
+        DataFrame with recommended movies and their similarity scores
     """
     try:
-        # Build content features
-        features_df, genre_features = build_content_features(movies, links)
-        
-        # Find target movie
-        target_row = features_df[features_df["tmdbId"] == int(target_tmdb_id)]
-        if target_row.empty:
+        # Find index of the target movie
+        target_idx = movies_df[movies_df['movieId'] == target_movie_id].index
+        if len(target_idx) == 0:
             return pd.DataFrame()
         
-        target_idx = target_row.index[0]
+        target_idx = target_idx[0]
         
-        # Calculate cosine similarity
-        similarity_matrix = cosine_similarity(genre_features)
-        target_similarities = similarity_matrix[target_idx]
+        # Compute similarity scores
+        similarity_scores = list(enumerate(cosine_similarity(tfidf_matrix[target_idx], tfidf_matrix).flatten()))
         
-        # Get similar movies (excluding the target movie itself)
-        similar_indices = np.argsort(target_similarities)[::-1][1:top_n+1]
+        # Sort by similarity (descending)
+        similarity_scores = sorted(similarity_scores, key=lambda x: x[1], reverse=True)
         
-        # Build recommendations dataframe
+        # Get top N recommendations (excluding the target movie itself)
         recommendations = []
-        for idx in similar_indices:
-            if target_similarities[idx] > 0:  # Only include movies with some similarity
-                recommendations.append({
-                    'movieId': features_df.iloc[idx]['movieId'],
-                    'tmdbId': int(features_df.iloc[idx]['tmdbId']),
-                    'title': features_df.iloc[idx]['title'],
-                    'genres': features_df.iloc[idx]['genres'],
-                    'similarity': target_similarities[idx]
-                })
+        for i, (idx, score) in enumerate(similarity_scores[1:top_n+1]):  # Skip the first one (itself)
+            movie_data = movies_df.iloc[idx]
+            recommendations.append({
+                'movieId': movie_data['movieId'],
+                'title': movie_data.get('clean_title', movie_data.get('title', '')),
+                'year': movie_data.get('year', ''),
+                'genres': movie_data.get('genres', ''),
+                'genre_list': movie_data.get('genre_list', []),
+                'avg_rating': movie_data.get('avg_rating', 0),
+                'rating_count': movie_data.get('rating_count', 0),
+                'similarity': score
+            })
         
         return pd.DataFrame(recommendations)
     
     except Exception as e:
-        print(f"Content-based filtering error: {e}")
+        print(f"Error in content_based_recommendations: {e}")
         return pd.DataFrame()
 
 @st.cache_data
@@ -344,106 +886,118 @@ def hybrid_recommendations(
     top_n: int = 12
 ):
     """
-    Hybrid recommendation system combining collaborative and content-based filtering.
+    Optimized hybrid recommendation system combining collaborative and content-based filtering.
     
     Args:
         target_tmdb_id: Target movie TMDB ID
         cf_weight: Weight for collaborative filtering (default 0.6)
         content_weight: Weight for content-based filtering (default 0.4)
+        top_n: Number of recommendations to return
     """
     try:
-        # Get collaborative filtering recommendations
+        # Get MovieLens ID from TMDB ID - optimized lookup
+        target_row = links.loc[links["tmdbId"] == int(target_tmdb_id)]
+        if target_row.empty:
+            return pd.DataFrame()
+        
+        target_ml_id = int(target_row.iloc[0]["movieId"])
+        
+        # Precompute content-based recommendations first (usually faster)
+        content_recs = content_based_recommendations(
+            target_movie_id=target_ml_id,
+            movies_df=movies,
+            tfidf_matrix=rec_tfidf_matrix,
+            top_n=top_n * 2  # Get fewer candidates initially
+        )
+        
+        # Only compute CF recommendations if content-based has results
+        if content_recs.empty:
+            # Fall back to CF if content-based fails
+            cf_recs = item_item_recommendations(
+                target_tmdb_id=target_tmdb_id,
+                ratings=ratings,
+                movies=movies,
+                links=links,
+                min_overlap=5,  # Even lower threshold for fallback
+                top_n=top_n
+            )
+            return cf_recs.head(top_n)
+        
+        # Get CF recommendations in parallel with content processing
         cf_recs = item_item_recommendations(
             target_tmdb_id=target_tmdb_id,
             ratings=ratings,
             movies=movies,
             links=links,
-            min_overlap=10,  # Lower threshold for hybrid
-            top_n=50  # Get more candidates
+            min_overlap=8,  # Slightly lower threshold for hybrid
+            top_n=top_n * 2  # Get fewer candidates
         )
         
-        # Get content-based recommendations
-        content_recs = content_based_recommendations(
-            target_tmdb_id=target_tmdb_id,
-            movies=movies,
-            links=links,
-            top_n=50  # Get more candidates
-        )
-        
-        # If one method fails, fall back to the other
-        if cf_recs.empty and content_recs.empty:
-            return pd.DataFrame()
-        elif cf_recs.empty:
+        # If CF fails, return content-based results
+        if cf_recs.empty:
             return content_recs.head(top_n)
-        elif content_recs.empty:
-            return cf_recs.head(top_n)
         
-        # Normalize scores to [0, 1] range
-        if not cf_recs.empty:
-            cf_recs = cf_recs.copy()
-            cf_max = cf_recs['similarity'].max()
-            cf_min = cf_recs['similarity'].min()
-            if cf_max != cf_min:
-                cf_recs['cf_score_norm'] = (cf_recs['similarity'] - cf_min) / (cf_max - cf_min)
-            else:
-                cf_recs['cf_score_norm'] = 1.0
+        # Precompute normalization parameters
+        cf_similarities = cf_recs['similarity'].values
+        content_similarities = content_recs['similarity'].values
         
-        if not content_recs.empty:
-            content_recs = content_recs.copy()
-            content_max = content_recs['similarity'].max()
-            content_min = content_recs['similarity'].min()
-            if content_max != content_min:
-                content_recs['content_score_norm'] = (content_recs['similarity'] - content_min) / (content_max - content_min)
-            else:
-                content_recs['content_score_norm'] = 1.0
+        cf_max, cf_min = np.max(cf_similarities), np.min(cf_similarities)
+        content_max, content_min = np.max(content_similarities), np.min(content_similarities)
         
-        # Merge recommendations on tmdbId
+        # Normalize CF scores
+        if cf_max > cf_min:
+            cf_recs['cf_score_norm'] = (cf_similarities - cf_min) / (cf_max - cf_min)
+        else:
+            cf_recs['cf_score_norm'] = 1.0 if cf_max > 0 else 0.0
+        
+        # Normalize content scores
+        if content_max > content_min:
+            content_recs['content_score_norm'] = (content_similarities - content_min) / (content_max - content_min)
+        else:
+            content_recs['content_score_norm'] = 1.0 if content_max > 0 else 0.0
+        
+        # Create lookup dictionaries for faster access
+        content_dict = {row['movieId']: row for _, row in content_recs.iterrows()}
+        cf_dict = {row['movieId']: row for _, row in cf_recs.iterrows()}
+        
+        # Get all unique movie IDs from both methods
+        all_movie_ids = set(content_dict.keys()) | set(cf_dict.keys())
+        
+        # Calculate hybrid scores
         hybrid_scores = []
-        
-        # Process CF recommendations
-        for _, row in cf_recs.iterrows():
-            tmdb_id = int(row['tmdbId'])
-            cf_score = row['cf_score_norm']
+        for movie_id in all_movie_ids:
+            cf_data = cf_dict.get(movie_id, {})
+            content_data = content_dict.get(movie_id, {})
             
-            # Check if this movie also appears in content recommendations
-            content_match = content_recs[content_recs['tmdbId'] == tmdb_id]
-            if not content_match.empty:
-                content_score = content_match.iloc[0]['content_score_norm']
-            else:
-                content_score = 0.0
+            cf_score = cf_data.get('cf_score_norm', 0.0)
+            content_score = content_data.get('content_score_norm', 0.0)
             
             # Calculate hybrid score
             hybrid_score = (cf_weight * cf_score) + (content_weight * content_score)
             
+            # Use title from whichever source has it
+            title = cf_data.get('title') or content_data.get('title', 'Unknown')
+            
+            # Get TMDB ID if available
+            tmdb_id = 0
+            if movie_id in cf_dict and 'tmdbId' in cf_dict[movie_id]:
+                tmdb_id = cf_dict[movie_id]['tmdbId']
+            else:
+                # Look up TMDB ID from links
+                link_row = links.loc[links['movieId'] == movie_id]
+                if not link_row.empty:
+                    tmdb_id = int(link_row.iloc[0]['tmdbId'])
+            
             hybrid_scores.append({
+                'movieId': movie_id,
+                'title': title,
                 'tmdbId': tmdb_id,
-                'title': row['title'],
-                'movieId': row['movieId'],
                 'cf_score': cf_score,
                 'content_score': content_score,
                 'hybrid_score': hybrid_score,
-                'avg_rating': row.get('avg_rating', np.nan),
-                'rating_cnt': row.get('rating_cnt', 0)
+                'avg_rating': cf_data.get('avg_rating', content_data.get('avg_rating', np.nan)),
+                'rating_cnt': cf_data.get('rating_cnt', content_data.get('rating_count', 0))
             })
-        
-        # Add content-only recommendations (movies not in CF results)
-        cf_tmdb_ids = set(cf_recs['tmdbId'].astype(int))
-        for _, row in content_recs.iterrows():
-            tmdb_id = int(row['tmdbId'])
-            if tmdb_id not in cf_tmdb_ids:
-                content_score = row['content_score_norm']
-                hybrid_score = content_weight * content_score  # Only content score
-                
-                hybrid_scores.append({
-                    'tmdbId': tmdb_id,
-                    'title': row['title'],
-                    'movieId': row['movieId'],
-                    'cf_score': 0.0,
-                    'content_score': content_score,
-                    'hybrid_score': hybrid_score,
-                    'avg_rating': np.nan,
-                    'rating_cnt': 0
-                })
         
         # Convert to DataFrame and sort by hybrid score
         hybrid_df = pd.DataFrame(hybrid_scores)
@@ -456,155 +1010,159 @@ def hybrid_recommendations(
         return pd.DataFrame()
 
 def render_hybrid_section_horizontal(target_tmdb_id: int):
-    """Render Hybrid recommendations using the horizontal 'rec-card' design."""
-    # Ensure CSS is loaded
+    """Render Hybrid recommendations using the horizontal 'rec-card' design; reuse cached HTML on reruns."""
     load_content_based_css()
-
-    ratings, movies, links = load_ml_small()
-    recs = hybrid_recommendations(
-        target_tmdb_id=target_tmdb_id,
-        ratings=ratings,
-        movies=movies,
-        links=links,
-        cf_weight=0.6,
-        content_weight=0.4,
-        top_n=12
-    )
-
     st.markdown("---")
     st.subheader("🚀 Best of Both Worlds")
     st.caption("Hybrid filtering combining collaborative (60%) and content (40%).")
 
-    if recs.empty:
-        st.info("No hybrid recommendations available.")
+    cached = st.session_state["html_cache"]["hybrid"].get(target_tmdb_id)
+    if cached:
+        st.markdown(cached, unsafe_allow_html=True)
         return
 
-    cards_html = ['<div class="rec-container">']
-
-    for _, row in recs.iterrows():
-        tmdb_id = int(row["tmdbId"])
-        title_full = (row.get("title") or "").strip()
-        clean_title = title_full.rsplit(" (", 1)[0] if " (" in title_full else title_full
-        display_title = (clean_title[:25] + "...") if len(clean_title) > 25 else clean_title
-
-        poster_url, _, release_date = fetch_tmdb_brief(tmdb_id)
-        year_display = ""
-        if release_date:
-            try:
-                year_display = str(datetime.strptime(release_date, "%Y-%m-%d").year)
-            except Exception:
-                year_display = ""
-
-        hybrid_score = row.get("hybrid_score", np.nan)
-        cf_score = row.get("cf_score", 0.0)
-        content_score = row.get("content_score", 0.0)
-        ml_avg = row.get("avg_rating", np.nan)
-        ml_cnt = int(row.get("rating_cnt", 0)) if pd.notna(row.get("rating_cnt", np.nan)) else 0
-        ml_text = f"{ml_avg:.2f}/5 • {ml_cnt} ratings" if pd.notna(ml_avg) and ml_cnt > 0 else "New"
-
-        poster_html = (
-            f'<img src="{poster_url}" class="rec-poster" alt="{display_title} Poster">'
-            if poster_url else
-            '<div class="rec-placeholder">🎬</div>'
+    with st.spinner("Loading hybrid recommendations..."):
+        ratings, movies, links = load_ml_small()
+        recs = hybrid_recommendations(
+            target_tmdb_id=target_tmdb_id,
+            ratings=ratings,
+            movies=movies,
+            links=links,
+            cf_weight=0.6,
+            content_weight=0.4,
+            top_n=12
         )
 
-        score_lines = []
-        if pd.notna(hybrid_score):
-            score_lines.append(f'⚡ Score: {hybrid_score:.2f}')
-        score_lines.append(f'CF {cf_score:.2f} • Content {content_score:.2f}')
-        score_lines.append(f'⭐ {ml_text}')
-        metrics_html = f'<div style="font-size:.75rem;color:#aaa;margin-top:4px;">' + "<br>".join(score_lines) + "</div>"
+        if recs.empty:
+            st.info("No hybrid recommendations available.")
+            return
 
-        cards_html.append(
-            f'<a href="/Movie_Details?movie_id={int(row.get("movieId", 0))}&source=movielens" '
-            f'style="text-decoration:none;color:inherit;" class="rec-link">'
-            f'<div class="rec-card">'
-            f'{poster_html}'
-            f'<div class="rec-title">{display_title}</div>'
-            f'<div class="rec-year">{year_display}</div>'
-            f'{metrics_html}'
-            f'</div></a>'
-        )
+        cards_html = ['<div class="rec-container">']
+        for _, row in recs.iterrows():
+            tmdb_id = int(row["tmdbId"])
+            title_full = (row.get("title") or "").strip()
+            clean_title = title_full.rsplit(" (", 1)[0] if " (" in title_full else title_full
+            display_title = (clean_title[:25] + "...") if len(clean_title) > 25 else clean_title
 
-    cards_html.append('</div>')
-    st.markdown("".join(cards_html), unsafe_allow_html=True)
+            poster_url, _, release_date = fetch_tmdb_brief(tmdb_id)
+            year_display = ""
+            if release_date:
+                try:
+                    year_display = str(datetime.strptime(release_date, "%Y-%m-%d").year)
+                except Exception:
+                    year_display = ""
+
+            hybrid_score = row.get("hybrid_score", np.nan)
+            cf_score = row.get("cf_score", 0.0)
+            content_score = row.get("content_score", 0.0)
+            ml_avg = row.get("avg_rating", np.nan)
+            ml_cnt = int(row.get("rating_cnt", 0)) if pd.notna(row.get("rating_cnt", np.nan)) else 0
+            ml_text = f"{ml_avg:.2f}/5 • {ml_cnt} ratings" if pd.notna(ml_avg) and ml_cnt > 0 else "New"
+
+            poster_html = (
+                f'<img src="{poster_url}" class="rec-poster" alt="{display_title} Poster">'
+                if poster_url else '<div class="rec-placeholder">🎬</div>'
+            )
+
+            score_lines = []
+            if pd.notna(hybrid_score):
+                score_lines.append(f'⚡ Score: {hybrid_score:.2f}')
+            score_lines.append(f'CF {cf_score:.2f} • Content {content_score:.2f}')
+            score_lines.append(f'⭐ {ml_text}')
+            metrics_html = f'<div style="font-size:.75rem;color:#aaa;margin-top:4px;">' + "<br>".join(score_lines) + "</div>"
+
+            cards_html.append(
+                f'<a href="/Movie_Details?movie_id={int(row.get("movieId", 0))}&source=movielens" '
+                f'style="text-decoration:none;color:inherit;" class="rec-link">'
+                f'<div class="rec-card">{poster_html}'
+                f'<div class="rec-title">{display_title}</div>'
+                f'<div class="rec-year">{year_display}</div>'
+                f'{metrics_html}</div></a>'
+            )
+
+        cards_html.append('</div>')
+        html = ''.join(cards_html)
+
+    st.session_state["html_cache"]["hybrid"][target_tmdb_id] = html
+    st.markdown(html, unsafe_allow_html=True)
+
 
             
 
 # Updated render_cf_section to fix the captions
 def render_cf_section_horizontal(target_tmdb_id: int):
-    """Render CF recommendations using the horizontal 'rec-card' design."""
-    # Ensure CSS is loaded
+    """Render CF recommendations using the horizontal 'rec-card' design; reuse cached HTML on reruns."""
     load_content_based_css()
-
-    ratings, movies, links = load_ml_small()
-    recs = item_item_recommendations(
-        target_tmdb_id=target_tmdb_id,
-        ratings=ratings,
-        movies=movies,
-        links=links,
-        min_overlap=20,
-        top_n=12
-    )
-
     st.markdown("---")
     st.subheader("🔁 Because You Liked This")
-    st.caption("Item–Item Collaborative Filtering (Pearson). Requires at least 20 users who rated both movies.")
+    st.caption("Item–Item Collaborative Filtering (Pearson). Requires at least 5 users who rated both movies.")
 
-    if recs.empty:
-        st.info("Not enough overlapping ratings to compute reliable neighbors for this title.")
+    cached = st.session_state["html_cache"]["cf"].get(target_tmdb_id)
+    if cached:
+        st.markdown(cached, unsafe_allow_html=True)
         return
 
-    # Build one horizontal scroller
-    cards_html = ['<div class="rec-container">']
-
-    for _, row in recs.iterrows():
-        tmdb_id = int(row["tmdbId"])
-        title_full = (row.get("title") or "").strip()
-        # Trim year suffix like "Toy Story (1995)" for prettier display
-        clean_title = title_full.rsplit(" (", 1)[0] if " (" in title_full else title_full
-        display_title = (clean_title[:25] + "...") if len(clean_title) > 25 else clean_title
-
-        poster_url, _, release_date = fetch_tmdb_brief(tmdb_id)
-        year_display = ""
-        if release_date:
-            try:
-                year_display = str(datetime.strptime(release_date, "%Y-%m-%d").year)
-            except Exception:
-                year_display = ""
-
-        # Metrics
-        sim = row.get("similarity", np.nan)
-        overlap = int(row.get("overlap", 0)) if pd.notna(row.get("overlap", np.nan)) else 0
-        ml_avg = row.get("avg_rating", np.nan)
-        ml_cnt = int(row.get("rating_cnt", 0)) if pd.notna(row.get("rating_cnt", np.nan)) else 0
-        ml_text = f"{ml_avg:.2f}/5 • {ml_cnt} ratings" if pd.notna(ml_avg) and ml_cnt > 0 else "New"
-
-        poster_html = (
-            f'<img src="{poster_url}" class="rec-poster" alt="{display_title} Poster">'
-            if poster_url else
-            '<div class="rec-placeholder">🎬</div>'
+    with st.spinner("Loading collaborative recommendations..."):
+        ratings, movies, links = load_ml_small()
+        recs = item_item_recommendations(
+            target_tmdb_id=target_tmdb_id,
+            ratings=ratings,
+            movies=movies,
+            links=links,
+            min_overlap=5,
+            top_n=12
         )
 
-        metrics_html = (
-            f'<div style="font-size:.75rem;color:#aaa;margin-top:4px;">'
-            f'📈 Similarity: {sim:.2f} • 👥 Overlap: {overlap}<br>⭐ {ml_text}'
-            f'</div>'
-        ) if pd.notna(sim) else f'<div style="font-size:.75rem;color:#aaa;margin-top:4px;">⭐ {ml_text}</div>'
+        if recs.empty:
+            st.info("Not enough overlapping ratings to compute reliable neighbors for this title.")
+            return
 
-        cards_html.append(
-            f'<a href="/Movie_Details?movie_id={int(row.get("movieId", 0))}&source=movielens" '
-            f'style="text-decoration:none;color:inherit;" class="rec-link">'
-            f'<div class="rec-card">'
-            f'{poster_html}'
-            f'<div class="rec-title">{display_title}</div>'
-            f'<div class="rec-year">{year_display}</div>'
-            f'{metrics_html}'
-            f'</div></a>'
-        )
+        cards_html = ['<div class="rec-container">']
+        for _, row in recs.iterrows():
+            tmdb_id = int(row["tmdbId"])
+            title_full = (row.get("title") or "").strip()
+            clean_title = title_full.rsplit(" (", 1)[0] if " (" in title_full else title_full
+            display_title = (clean_title[:25] + "...") if len(clean_title) > 25 else clean_title
 
-    cards_html.append('</div>')
-    st.markdown("".join(cards_html), unsafe_allow_html=True)
+            poster_url, _, release_date = fetch_tmdb_brief(tmdb_id)
+            year_display = ""
+            if release_date:
+                try:
+                    year_display = str(datetime.strptime(release_date, "%Y-%m-%d").year)
+                except Exception:
+                    year_display = ""
+
+            sim = row.get("similarity", np.nan)
+            overlap = int(row.get("overlap", 0)) if pd.notna(row.get("overlap", np.nan)) else 0
+            ml_avg = row.get("avg_rating", np.nan)
+            ml_cnt = int(row.get("rating_cnt", 0)) if pd.notna(row.get("rating_cnt", np.nan)) else 0
+            ml_text = f"{ml_avg:.2f}/5 • {ml_cnt} ratings" if pd.notna(ml_avg) and ml_cnt > 0 else "New"
+
+            poster_html = (
+                f'<img src="{poster_url}" class="rec-poster" alt="{display_title} Poster">'
+                if poster_url else '<div class="rec-placeholder">🎬</div>'
+            )
+
+            metrics_html = (
+                f'<div style="font-size:.75rem;color:#aaa;margin-top:4px;">'
+                f'📈 Similarity: {sim:.2f} • 👥 Overlap: {overlap}<br>⭐ {ml_text}'
+                f'</div>'
+            ) if pd.notna(sim) else f'<div style="font-size:.75rem;color:#aaa;margin-top:4px;">⭐ {ml_text}</div>'
+
+            cards_html.append(
+                f'<a href="/Movie_Details?movie_id={int(row.get("movieId", 0))}&source=movielens" '
+                f'style="text-decoration:none;color:inherit;" class="rec-link">'
+                f'<div class="rec-card">{poster_html}'
+                f'<div class="rec-title">{display_title}</div>'
+                f'<div class="rec-year">{year_display}</div>'
+                f'{metrics_html}</div></a>'
+            )
+        cards_html.append('</div>')
+        html = ''.join(cards_html)
+
+    st.session_state["html_cache"]["cf"][target_tmdb_id] = html
+    st.markdown(html, unsafe_allow_html=True)
+
 
 
 def load_content_based_css():
@@ -714,68 +1272,67 @@ def load_content_based_css():
 
 # ----- Content-Based Recommendation Rendering -----
 def render_content_based_recommendations(detail_id_int, movies_df, vectorizer, tfidf_matrix):
-    """Render content-based recommendations for a given movie"""
-    # Load the CSS for recommendations
+    """Render content-based recommendations for a given movie; reuse cached HTML on reruns."""
     load_content_based_css()
-    
     st.markdown("---")
     st.subheader("🍿 More like this movie...")
     st.caption("Content-based filtering using genre similarities.")
 
+    # Serve from cache if we already built it
+    cached = st.session_state["html_cache"]["content"].get(detail_id_int)
+    if cached:
+        st.markdown(cached, unsafe_allow_html=True)
+        return
 
+    with st.spinner("Loading similar movies..."):
+        recommendations = content_based_recommendations(detail_id_int, movies_df, tfidf_matrix, top_n=10)
+        if recommendations.empty:
+            st.info("No content-based recommendations available for this movie.")
+            return
 
-    try:
-        # Find index of the current movie
-        current_index = movies_df[movies_df['movieId'] == detail_id_int].index[0]
-
-        # Compute similarity scores for this movie
-        similarity_scores = list(enumerate(cosine_similarity(tfidf_matrix[current_index], tfidf_matrix).flatten()))
-
-        # Sort by similarity
-        similarity_scores = sorted(similarity_scores, key=lambda x: x[1], reverse=True)
-
-        # Top N recommendations (skip first one, because it's the same movie)
-        top_indices = [i for i, score in similarity_scores[1:11]]  # Top 10
-        recommended_movies = movies_df.iloc[top_indices]
-
-        # Build the entire horizontal container using local data + TMDB posters
-        rec_cards_html = '<div class="rec-container">'
-        
-        for _, rec in recommended_movies.iterrows():
+        rec_cards_html = ['<div class="rec-container">']
+        for _, rec in recommendations.iterrows():
             rec_id = rec.get('movieId')
-            rec_title = rec.get('clean_title', rec.get('title', ''))
+            rec_title = rec.get('title', '')
             rec_year = rec.get('year', '')
             rec_genres = rec.get('genre_list', [])
-            
-            # Limit title length for better display and escape HTML characters
+            rec_avg_rating = rec.get('avg_rating', 'N/A')
+            similarity_score = rec.get('similarity', 0)
+
             display_title = rec_title[:25] + "..." if len(rec_title) > 25 else rec_title
             display_title = display_title.replace('"', '&quot;').replace("'", "&#x27;")
-            
-            # Get poster URL from TMDB
+
             poster_url = get_poster_for_movie(rec_title, rec_year if pd.notna(rec_year) else None)
-            
-            # Use actual poster or placeholder
-            if poster_url:
-                poster_html = f'<img src="{poster_url}" class="rec-poster" alt="{rec_title} Poster">'
-            else:
-                poster_html = '<div class="rec-placeholder">🎬</div>'
-            
-            # Create genre display
+            poster_html = (
+                f'<img src="{poster_url}" class="rec-poster" alt="{rec_title} Poster">'
+                if poster_url else '<div class="rec-placeholder">🎬</div>'
+            )
+
             genre_display = ''
             if rec_genres and isinstance(rec_genres, list):
                 valid_genres = [g for g in rec_genres[:2] if g != "(no genres listed)"]
                 if valid_genres:
                     genre_display = f'<div style="font-size: 0.7rem; color: #888; margin-top: 2px;">{" • ".join(valid_genres)}</div>'
 
-            rec_cards_html += f'<a href="/Movie_Details?movie_id={rec_id}&source=movielens" style="text-decoration:none; color:inherit;" class="rec-link"><div class="rec-card">{poster_html}<div class="rec-title">{display_title}</div><div class="rec-year">{int(rec_year) if pd.notna(rec_year) else ""}</div>{genre_display}</div></a>'
-        
-        rec_cards_html += '</div>'
-        
-        # Render the complete horizontal container in one go
-        st.markdown(rec_cards_html, unsafe_allow_html=True)
+            similarity_html = f'<div style="font-size: 0.75rem; color: #aaa; margin-top: 5px;">📈Similarity: {similarity_score:.2f}</div>'
+            rating_html = f'<div style="font-size: 0.75rem; color: #aaa; margin-top: 5px;">⭐Rating: {rec_avg_rating}</div>' if rec_avg_rating != 'N/A' else ''
 
-    except Exception as e:
-        st.warning(f"Could not load recommendations: {e}")
+            rec_cards_html.append(
+                f'<a href="/Movie_Details?movie_id={rec_id}&source=movielens" '
+                f'style="text-decoration:none; color:inherit;" class="rec-link">'
+                f'<div class="rec-card">{poster_html}'
+                f'<div class="rec-title">{display_title}</div>'
+                f'<div class="rec-year">{int(rec_year) if pd.notna(rec_year) else ""}</div>'
+                f'{genre_display}{similarity_html}{rating_html}</div></a>'
+            )
+        rec_cards_html.append('</div>')
+        html = ''.join(rec_cards_html)
+
+    # store + render
+    st.session_state["html_cache"]["content"][detail_id_int] = html
+    st.markdown(html, unsafe_allow_html=True)
+
+
 
 # ----- Data Initialization -----
 # Load MovieLens data for content-based recommendations
@@ -838,6 +1395,29 @@ def get_movielens_rating_for_tmdb(tmdb_id: int, base_dir: str = "dataset/ml-late
 
 
 # ---------- Item–Item CF (memory-based) ----------
+@st.cache_resource
+def build_cached_correlation_matrix(ratings: pd.DataFrame, min_overlap: int = 5):
+    """
+    Precompute and cache the correlation matrix for faster recommendations.
+    Only computes correlations for movies with sufficient ratings.
+    """
+    user_item = build_user_item_matrix(ratings)
+    
+    # Filter movies with at least min_overlap ratings
+    rating_counts = user_item.notna().sum()
+    valid_movies = rating_counts[rating_counts >= min_overlap].index
+    
+    if len(valid_movies) == 0:
+        return pd.DataFrame()
+    
+    # Only compute correlations for movies with sufficient ratings
+    user_item_filtered = user_item[valid_movies]
+    
+    # Compute correlation matrix
+    corr_mat = user_item_filtered.corr(method="pearson", min_periods=min_overlap)
+    
+    return corr_mat, valid_movies
+
 @st.cache_data
 def item_item_recommendations(
     target_tmdb_id: int,
@@ -848,62 +1428,85 @@ def item_item_recommendations(
     top_n: int = 12,
 ):
     """
-    Return top-N movies most similar to the target movie using Pearson corr
-    on co-rating users (minimum co-rater count = min_overlap).
+    Optimized item-item collaborative filtering recommendations.
+    Uses precomputed correlation matrix for faster results.
     """
-    # TMDB -> MovieLens mapping
-    row = links.loc[links["tmdbId"] == int(target_tmdb_id)]
-    if row.empty:
+    try:
+        # Get MovieLens ID from TMDB ID
+        target_row = links.loc[links["tmdbId"] == int(target_tmdb_id)]
+        if target_row.empty:
+            return pd.DataFrame()
+        
+        target_ml_id = int(target_row.iloc[0]["movieId"])
+        
+        # Get precomputed correlation matrix
+        corr_mat, valid_movies = build_cached_correlation_matrix(ratings, min_overlap)
+        
+        if corr_mat.empty or target_ml_id not in valid_movies:
+            return pd.DataFrame()
+        
+        # Get similarities for target movie
+        if target_ml_id not in corr_mat.columns:
+            return pd.DataFrame()
+            
+        sim = corr_mat[target_ml_id].drop(labels=[target_ml_id], errors="ignore")
+        sim = sim.dropna().sort_values(ascending=False).head(top_n * 2)  # Get more candidates
+        
+        if sim.empty:
+            return pd.DataFrame()
+        
+        # Get user-item matrix for overlap calculation
+        user_item = build_user_item_matrix(ratings)
+        
+        # Calculate overlap counts more efficiently
+        mask_target = user_item[target_ml_id].notna()
+        overlap_counts = {}
+        
+        for movie_id in sim.index:
+            overlap = (mask_target & user_item[movie_id].notna()).sum()
+            overlap_counts[movie_id] = overlap
+        
+        # Convert to Series
+        overlap = pd.Series(overlap_counts)
+        
+        # Precompute rating stats
+        stats = ratings.groupby("movieId").agg(
+            avg_rating=("rating", "mean"),
+            rating_cnt=("rating", "count")
+        )
+        
+        # Build recommendations
+        recs = (
+            pd.DataFrame({"similarity": sim})
+            .assign(overlap=overlap)
+            .join(stats, how="left")
+            .sort_values(["similarity", "overlap", "rating_cnt"], ascending=False)
+        )
+        
+        # Filter by minimum overlap
+        recs = recs[recs["overlap"] >= min_overlap].head(top_n)
+        
+        if recs.empty:
+            return pd.DataFrame()
+        
+        # Add titles and TMDB IDs
+        recs = (
+            recs.reset_index()
+            .rename(columns={"index": "movieId"})
+            .merge(movies[["movieId", "title"]], on="movieId", how="left")
+            .merge(links[["movieId", "tmdbId"]], on="movieId", how="left")
+        )
+        
+        recs = recs[recs["tmdbId"].notna()].copy()
+        recs["tmdbId"] = recs["tmdbId"].astype(int)
+        
+        return recs.head(top_n)
+    
+    except Exception as e:
+        print(f"Item-item recommendation error: {e}")
         return pd.DataFrame()
 
-    target_ml_id = int(row.iloc[0]["movieId"])
-
-    # user–item matrix
-    user_item = build_user_item_matrix(ratings)
-
-    # must exist as a column
-    if target_ml_id not in user_item.columns:
-        return pd.DataFrame()
-
-    # ---- Pearson item–item sim with min co-raters (works in older pandas) ----
-    corr_mat = user_item.corr(method="pearson", min_periods=min_overlap)
-
-    if target_ml_id not in corr_mat.columns:
-        return pd.DataFrame()
-
-    sim = corr_mat[target_ml_id].drop(labels=[target_ml_id], errors="ignore")
-    sim = sim.dropna().sort_values(ascending=False).head(200)
-
-    # ---- overlap counts (users who rated both movies) ----
-    mask_target = user_item[target_ml_id].notna()
-    overlap = (mask_target & user_item.notna()).sum()
-    overlap = overlap.reindex(sim.index)
-
-    # stability stats
-    stats = ratings.groupby("movieId").agg(
-        avg_rating=("rating", "mean"),
-        rating_cnt=("rating", "count")
-    )
-
-    recs = (
-        pd.DataFrame({"similarity": sim})
-        .join(overlap.rename("overlap"))
-        .join(stats, how="left")
-        .sort_values(["similarity", "overlap", "rating_cnt"], ascending=False)
-    )
-
-    # titles + tmdb
-    recs = (
-        recs.reset_index()
-        .rename(columns={"index": "movieId"})
-        .merge(movies[["movieId", "title"]], on="movieId", how="left")
-        .merge(links[["movieId", "tmdbId"]], on="movieId", how="left")
-    )
-
-    recs = recs[recs["tmdbId"].notna()].head(top_n).copy()
-    recs["tmdbId"] = recs["tmdbId"].astype(int)
-    return recs
-
+@st.cache_data
 def fetch_tmdb_brief(tmdb_id: int):
     """Poster + vote_average (used for the rec grid)."""
     try:
@@ -915,6 +1518,7 @@ def fetch_tmdb_brief(tmdb_id: int):
         return poster, d.get("vote_average", None), d.get("release_date","")
     except Exception:
         return None, None, ""
+
     
 def render_cf_section(target_tmdb_id: int):
     ratings, movies, links = load_ml_small()
@@ -1030,6 +1634,25 @@ else:
         row_map = links_small.loc[links_small["movieId"] == ml_movie_id]
         if not row_map.empty:
             tmdb_id = int(row_map.iloc[0]["tmdbId"]) if not pd.isna(row_map.iloc[0]["tmdbId"]) else None
+
+# --- Clear cached recommendation HTML if the context movie changes ---
+# Make sure our HTML caches exist
+st.session_state.setdefault("html_cache", {"content": {}, "cf": {}, "hybrid": {}})
+st.session_state.setdefault("last_ids", {"ml": None, "tmdb": None})
+
+current_ids = {"ml": ml_movie_id, "tmdb": tmdb_id}
+last_ids = st.session_state["last_ids"]
+
+if current_ids != last_ids:
+    # Clear only the entries for the current movie ids (if present)
+    for k in ("content", "cf", "hybrid"):
+        if ml_movie_id is not None:
+            st.session_state["html_cache"][k].pop(ml_movie_id, None)
+        if tmdb_id is not None:
+            st.session_state["html_cache"][k].pop(tmdb_id, None)
+    st.session_state["last_ids"] = current_ids
+
+
 
 # If we still have no movie detail, continue with TMDB-only rendering; else use MovieLens info too
 movie_title = movie.get("clean_title", movie.get("title", "")) if movie is not None else None
@@ -1199,11 +1822,150 @@ try:
     # Content-Based Filtering (MovieLens-based)
     if detail_id_int is not None and not movies_df.empty:
         render_content_based_recommendations(detail_id_int, movies_df, rec_vectorizer, rec_tfidf_matrix)
+        content_eval_slot = st.empty()
 
-    # Collaborative Filtering and Hybrid require TMDB id
+        # Content-Based evaluation
+        if st.button("Evaluate Content-Based Algorithm", key="eval_content"):
+            ratings_small, movies_small, links_small = load_ml_small()
+            content_metrics, content_similarities = evaluate_single_algorithm("content", ratings_small, movies_small, links_small)
+            metrics_dict = {"Content-Based": content_metrics}
+            fig = create_evaluation_plots(metrics_dict, "Content-Based", content_similarities)
+            st.session_state["figs"]["content_eval_fig"] = fig
+
+        # show graph always below the button
+        if st.session_state["figs"].get("content_eval_fig") is not None:
+            st.pyplot(st.session_state["figs"]["content_eval_fig"])
+
+                
+
+    # In the collaborative filtering section, add the evaluation button and display
     if tmdb_id is not None:
         render_cf_section_horizontal(int(tmdb_id))
+        
+        # Add evaluation button for collaborative filtering
+        cf_eval_slot = st.empty()
+
+        # ===== Collaborative Filtering evaluation =====
+        if st.button("Evaluate Collaborative Filtering Algorithm", key="eval_cf"):
+            ratings_small, movies_small, links_small = load_ml_small()
+            cf_metrics, cf_similarities = evaluate_single_algorithm("cf", ratings_small, movies_small, links_small)
+            metrics_dict = {"Collaborative": cf_metrics}
+            fig = create_evaluation_plots(metrics_dict, "Collaborative", cf_similarities)
+            st.session_state["figs"]["cf_eval_fig"] = fig
+
+        # show graph below the button
+        if st.session_state["figs"].get("cf_eval_fig") is not None:
+            st.pyplot(st.session_state["figs"]["cf_eval_fig"])
+
+                
+
+    # In the hybrid recommendations section, add the evaluation button and display
+    if tmdb_id is not None:
         render_hybrid_section_horizontal(int(tmdb_id))
+        
+        # Add evaluation button for hybrid
+        hybrid_eval_slot = st.empty()
+
+        # ===== Hybrid evaluation =====
+        if st.button("Evaluate Hybrid Algorithm", key="eval_hybrid"):
+            ratings_small, movies_small, links_small = load_ml_small()
+            hybrid_metrics, hybrid_scores = evaluate_single_algorithm("hybrid", ratings_small, movies_small, links_small)
+            metrics_dict = {"Hybrid": hybrid_metrics}
+            fig = create_hybrid_evaluation_plots(metrics_dict, hybrid_scores)
+            st.session_state["figs"]["hybrid_eval_fig"] = fig
+
+        # show graph below the button
+        if st.session_state["figs"].get("hybrid_eval_fig") is not None:
+            st.pyplot(st.session_state["figs"]["hybrid_eval_fig"])
+
     
 except Exception as e:
     st.warning(f"Recommendations unavailable: {e}")
+
+st.markdown("---")
+st.header("📊 Algorithm Comparison")
+st.caption("Compare performance of all three recommendation algorithms")
+
+compare_slot = st.empty()
+
+# ===== Algorithm Comparison =====
+if st.button("🚀 Run Algorithm Comparison", key="compare_algorithms"):
+    with compare_slot:
+        with st.spinner("Comparing algorithms..."):
+            ratings_small, movies_small, links_small = load_ml_small()
+            content_metrics, _ = evaluate_single_algorithm("content", ratings_small, movies_small, links_small)
+            cf_metrics, _ = evaluate_single_algorithm("cf", ratings_small, movies_small, links_small)
+            hybrid_metrics, _ = evaluate_single_algorithm("hybrid", ratings_small, movies_small, links_small)
+            metrics_dict = {"Content-Based": content_metrics, "Collaborative": cf_metrics, "Hybrid": hybrid_metrics}
+
+            # table
+            metrics_df = pd.DataFrame(metrics_dict).T
+            st.dataframe(metrics_df.style.format("{:.3f}").highlight_max(axis=0))
+
+            # figure
+            fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15, 4))
+            algorithms = list(metrics_dict.keys())
+
+            precision_values = [metrics_dict[a]['Precision@K'] for a in algorithms]
+            m = max(precision_values) if precision_values else 1.0; y = m * 0.15
+            ax1.bar(algorithms, precision_values, color=['#FF6B6B', '#4ECDC4', '#45B7D1'])
+            ax1.set_title('Precision@K Comparison'); ax1.set_ylabel('Precision@K')
+            ax1.set_ylim(0, m + y); ax1.tick_params(axis='x', rotation=45)
+            for i, v in enumerate(precision_values): ax1.text(i, v + (y * 0.1), f'{v:.3f}', ha='center', va='bottom', fontsize=10)
+
+            recall_values = [metrics_dict[a]['Recall@K'] for a in algorithms]
+            m = max(recall_values) if recall_values else 1.0; y = m * 0.15
+            ax2.bar(algorithms, recall_values, color=['#FF6B6B', '#4ECDC4', '#45B7D1'])
+            ax2.set_title('Recall@K Comparison'); ax2.set_ylabel('Recall@K')
+            ax2.set_ylim(0, m + y); ax2.tick_params(axis='x', rotation=45)
+            for i, v in enumerate(recall_values): ax2.text(i, v + (y * 0.1), f'{v:.3f}', ha='center', va='bottom', fontsize=10)
+
+            f1_values = [metrics_dict[a]['F1@K'] for a in algorithms]
+            m = max(f1_values) if f1_values else 1.0; y = m * 0.15
+            ax3.bar(algorithms, f1_values, color=['#FF6B6B', '#4ECDC4', '#45B7D1'])
+            ax3.set_title('F1@K Comparison'); ax3.set_ylabel('F1@K')
+            ax3.set_ylim(0, m + y); ax3.tick_params(axis='x', rotation=45)
+            for i, v in enumerate(f1_values): ax3.text(i, v + (y * 0.1), f'{v:.3f}', ha='center', va='bottom', fontsize=10)
+
+            plt.tight_layout()
+            st.session_state["figs"]["alg_compare_fig"] = fig
+
+
+# show graph below the button
+if st.session_state["figs"].get("alg_compare_fig") is not None:
+    st.pyplot(st.session_state["figs"]["alg_compare_fig"])
+
+
+# Add RMSE/MAE Evaluation section
+st.markdown("---")
+st.header("📈 Rating Prediction Evaluation")
+st.caption("Evaluate rating prediction accuracy using RMSE and MAE")
+
+rmse_slot = st.empty()
+
+# ===== RMSE/MAE evaluation =====
+if st.button("📊 Run RMSE/MAE Evaluation", key="eval_rmse"):
+    with rmse_slot:
+        with st.spinner("Evaluating rating prediction..."):
+            ratings_small, movies_small, links_small = load_ml_small()
+            rmse_res = evaluate_rmse_baseline(ratings_small)
+
+            # table
+            rmse_df = pd.DataFrame({"RMSE": [rmse_res.get("RMSE", 0.0)], "MAE": [rmse_res.get("MAE", 0.0)]})
+            st.dataframe(rmse_df.style.format("{:.4f}"))
+
+            # figure (narrower width)
+            fig, ax = plt.subplots(figsize=(4, 3))
+            metrics = ['RMSE', 'MAE']
+            values = [rmse_res.get("RMSE", 0.0), rmse_res.get("MAE", 0.0)]
+            m = max(values) if values else 1.0; y = m * 0.15
+            ax.bar(metrics, values, color=['#FF6B6B', '#4ECDC4'])
+            ax.set_title('Rating Prediction Error'); ax.set_ylabel('Error'); ax.set_ylim(0, m + y)
+            for i, v in enumerate(values): ax.text(i, v + (y * 0.1), f'{v:.4f}', ha='center', va='bottom', fontsize=10)
+            plt.tight_layout()
+            st.session_state["figs"]["rmse_fig"] = fig
+
+
+# show graph below the button
+if st.session_state["figs"].get("rmse_fig") is not None:
+    st.pyplot(st.session_state["figs"]["rmse_fig"], use_container_width=False)
