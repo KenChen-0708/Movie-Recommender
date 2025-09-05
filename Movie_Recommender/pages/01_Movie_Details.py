@@ -12,7 +12,6 @@ import random
 from collections import defaultdict
 import matplotlib.pyplot as plt
 import scipy.sparse as sp
-import matplotlib.pyplot as plt
 
 
 def create_hybrid_evaluation_plots(metrics_dict, hybrid_scores=None):
