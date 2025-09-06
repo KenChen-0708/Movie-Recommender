@@ -420,6 +420,7 @@ def load_navbar():
         <div class="navbar-links">
             <a href="/" target="_self">🏠 Home</a>
             <a href="/Movie-Selection" target="_self">🔍 Movie Search</a>
+            <a href="/Evaluation" target="_self">📊 Evaluation</a>
         </div>
     </div>
     """, unsafe_allow_html=True)
