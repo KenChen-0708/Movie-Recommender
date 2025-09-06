@@ -14,6 +14,7 @@ import matplotlib.pyplot as plt
 import scipy.sparse as sp
 from Homepage import load_navbar
 import time, os
+from sklearn.preprocessing import normalize
 
 # TMDB API Configuration
 API_KEY = "6272a18b79461f7987d2f1047b3d1198"
@@ -141,33 +142,44 @@ def load_ratings_with_stats():
 # ----- Content-Based Recommendation Engine -----
 @st.cache_resource
 def get_recommendation_vectorizer_and_matrix(dataframe):
-    """Create TF-IDF vectorizer and matrix for content-based recommendations"""
-    # Create enhanced recommendation blob with title, genres, AND tags
-    dataframe['title'] = dataframe['title'].fillna('')
-    dataframe['genres'] = dataframe['genres'].fillna('')
-    dataframe['clean_title'] = dataframe['clean_title'].fillna('')
-    dataframe['tag'] = dataframe['tag'].fillna('')
-    
-    # Create comprehensive content features for recommendations
-    dataframe['recommendation_blob'] = (
-        dataframe['title'] + ' ' + 
-        dataframe['clean_title'] + ' ' + 
-        dataframe['genres'].str.replace('|', ' ') + ' ' +
-        dataframe['tag']
-    ).str.lower()
-    
-    # Clean the recommendation blob
-    dataframe['recommendation_blob'] = dataframe['recommendation_blob'].str.replace(r'[^\w\s]', ' ', regex=True)
-    dataframe['recommendation_blob'] = dataframe['recommendation_blob'].str.replace(r'\s+', ' ', regex=True)
-    
-    vectorizer = TfidfVectorizer(
-        stop_words='english', 
-        max_features=10000,  # More features for better tag representation
-        min_df=1,  # Include even rare words (good for specific tags)
-        ngram_range=(1, 2)  # Include both single words and bigrams
+    df = dataframe.copy()
+
+    df["clean_title"] = df["clean_title"].fillna("").astype(str)
+    df["genres"]      = df["genres"].fillna("").astype(str)
+    df["tag"]         = df["tag"].fillna("").astype(str)
+
+    title_vec = TfidfVectorizer(
+        stop_words="english", ngram_range=(1, 2),
+        sublinear_tf=True, min_df=2, max_features=8000
     )
-    tfidf_matrix = vectorizer.fit_transform(dataframe['recommendation_blob'])
-    return vectorizer, tfidf_matrix
+    X_title = title_vec.fit_transform(df["clean_title"])
+
+    tags_vec = TfidfVectorizer(
+        stop_words="english", ngram_range=(1, 2),
+        sublinear_tf=True, min_df=2, max_features=15000
+    )
+    X_tags = tags_vec.fit_transform(df["tag"])
+
+    genre_lists = (
+        df["genres"].str.replace("(no genres listed)", "", regex=False)
+                     .str.split("|")
+                     .apply(lambda lst: [g for g in lst if g])
+    )
+    mlb = MultiLabelBinarizer()
+    X_genre = sp.csr_matrix(mlb.fit_transform(genre_lists))
+
+    # weighted stack
+    X = sp.hstack([3.0 * X_title, 2.0 * X_genre, 1.5 * X_tags], format="csr")
+    # global L2 normalize so cosine is truly cosine
+    X = normalize(X, norm="l2", axis=1, copy=False)
+
+    model_dict = {"title_vec": title_vec, "tags_vec": tags_vec, "genre_mlb": mlb}
+    return model_dict, X
+
+def bayesian_average(avg, cnt, global_mean, m=50):
+    # m = strength of prior (tune 25–200). 50 works well on ml-latest-small.
+    return (cnt * avg + m * global_mean) / (cnt + m) if cnt and cnt > 0 else global_mean
+
 
 # ----- CSS Styling -----
 def load_custom_css():
@@ -420,56 +432,49 @@ def generate_star_display_html(rating, max_rating=5):
 
 # Content-Based Filtering Functions
 def content_based_recommendations(target_movie_id, movies_df, tfidf_matrix, top_n=12):
-    """
-    Generate content-based recommendations for a given movie ID.
-    
-    Args:
-        target_movie_id: MovieLens movie ID of the target movie
-        movies_df: DataFrame containing movie information
-        tfidf_matrix: Precomputed TF-IDF matrix for all movies
-        top_n: Number of recommendations to return
-    
-    Returns:
-        DataFrame with recommended movies and their similarity scores
-    """
     try:
-        # Find index of the target movie
-        target_idx = movies_df[movies_df['movieId'] == target_movie_id].index
-        if len(target_idx) == 0:
+        idx_list = movies_df.index[movies_df['movieId'] == target_movie_id].tolist()
+        if not idx_list:
             return pd.DataFrame()
-        
-        target_idx = target_idx[0]
-        
-        # Compute similarity scores
-        similarity_scores = list(enumerate(cosine_similarity(tfidf_matrix[target_idx], tfidf_matrix).flatten()))
-        
-        # Sort by similarity (descending)
-        similarity_scores = sorted(similarity_scores, key=lambda x: x[1], reverse=True)
-        
-        # Get top N recommendations (excluding the target movie itself)
-        recommendations = []
-        for i, (idx, score) in enumerate(similarity_scores[1:top_n+1]):  # Skip the first one (itself)
-            movie_data = movies_df.iloc[idx]
-            # Handle missing genre_list
-            genres = movie_data.get('genres', '')
-            genre_list = genres.split('|') if isinstance(genres, str) else []
+        target_idx = idx_list[0]
 
-            recommendations.append({
-                'movieId': movie_data['movieId'],
-                'title': movie_data.get('clean_title', movie_data.get('title', '')),
-                'year': movie_data.get('year', ''),
-                'genres': movie_data.get('genres', ''),
-                'genre_list': movie_data.get('genre_list', []),
-                'avg_rating': movie_data.get('avg_rating', 0),
-                'rating_count': movie_data.get('rating_count', 0),
-                'similarity': score
-            })
-        
-        return pd.DataFrame(recommendations)
-    
+        sims = cosine_similarity(tfidf_matrix[target_idx], tfidf_matrix).ravel()
+        sims[target_idx] = -1  # exclude itself
+
+        # Pull basic fields
+        df = movies_df[["movieId","clean_title","year","genres","avg_rating","rating_count"]].copy()
+        df["similarity"] = sims
+
+        # Bayesian popularity smoothing
+        global_mean = float(movies_df["avg_rating"].replace(0, np.nan).mean())
+        df["bayes"] = [
+            bayesian_average(r, c, global_mean, m=50)
+            for r, c in zip(df["avg_rating"].fillna(0), df["rating_count"].fillna(0))
+        ]
+
+        # Final content score: tune alpha to taste (0.8 favors pure similarity)
+        alpha = 0.8
+        # rank-normalize pieces to [0,1] to be safe
+        df["sim_norm"]  = (df["similarity"] - df["similarity"].min()) / (df["similarity"].max() - df["similarity"].min() + 1e-12)
+        df["bayes_norm"]= (df["bayes"] - df["bayes"].min()) / (df["bayes"].max() - df["bayes"].min() + 1e-12)
+        df["content_score"] = alpha * df["sim_norm"] + (1 - alpha) * df["bayes_norm"]
+
+        # compute genre_list for rendering
+        def _gl(genres):
+            if isinstance(genres, str):
+                return [g for g in genres.split("|") if g and g != "(no genres listed)"]
+            return []
+        df["genre_list"] = df["genres"].apply(_gl)
+
+        out = (df.sort_values("content_score", ascending=False)
+                 .head(top_n)
+                 .rename(columns={"clean_title":"title"})
+                 [["movieId","title","year","genres","genre_list","avg_rating","rating_count","similarity","content_score"]])
+        return out
     except Exception as e:
         print(f"Error in content_based_recommendations: {e}")
         return pd.DataFrame()
+
 
 # ----- Content-Based Recommendation Rendering -----
 def render_content_based_recommendations(detail_id_int, movies_df, vectorizer, tfidf_matrix):
@@ -534,6 +539,7 @@ def render_content_based_recommendations(detail_id_int, movies_df, vectorizer, t
     st.markdown(html, unsafe_allow_html=True)
 
 
+
 # ---------- Item–Item CF (memory-based) ----------
 @st.cache_resource
 def build_user_item_matrix(ratings: pd.DataFrame):
@@ -543,26 +549,19 @@ def build_user_item_matrix(ratings: pd.DataFrame):
     
 @st.cache_resource
 def build_cached_correlation_matrix(ratings: pd.DataFrame, min_overlap: int = 15):
-    """
-    Precompute and cache the correlation matrix for faster recommendations.
-    Only computes correlations for movies with sufficient ratings.
-    """
     user_item = build_user_item_matrix(ratings)
-    
-    # Filter movies with at least min_overlap ratings
+
     rating_counts = user_item.notna().sum()
     valid_movies = rating_counts[rating_counts >= min_overlap].index
-    
+
     if len(valid_movies) == 0:
-        return pd.DataFrame()
-    
-    # Only compute correlations for movies with sufficient ratings
+        # Always return a (corr_mat, valid_movies) tuple
+        return pd.DataFrame(), pd.Index([])   # <- FIX
+
     user_item_filtered = user_item[valid_movies]
-    
-    # Compute correlation matrix
     corr_mat = user_item_filtered.corr(method="pearson", min_periods=min_overlap)
-    
     return corr_mat, valid_movies
+
    
 @st.cache_data
 def fetch_tmdb_brief(tmdb_id: int):
@@ -743,140 +742,130 @@ def render_cf_section_horizontal(target_tmdb_id: int):
 def hybrid_recommendations(
     target_tmdb_id: int,
     ratings: pd.DataFrame,
-    movies: pd.DataFrame,
     links: pd.DataFrame,
     cf_weight: float = 0.6,
     content_weight: float = 0.4,
     top_n: int = 12
 ):
     """
-    Optimized hybrid recommendation system combining collaborative and content-based filtering.
-    
-    Args:
-        target_tmdb_id: Target movie TMDB ID
-        cf_weight: Weight for collaborative filtering (default 0.6)
-        content_weight: Weight for content-based filtering (default 0.4)
-        top_n: Number of recommendations to return
+    Hybrid = weighted blend of:
+      • Content-based: uses the SAME TF-IDF + movies_df used by the content UI
+      • Item–Item CF : uses the SAME function used by the CF UI
+
+    Note: We intentionally DO NOT accept a 'movies' arg here to avoid mixing
+    TF-IDF (built on movies_df) with a different dataframe.
     """
     try:
-        # Get MovieLens ID from TMDB ID - optimized lookup
-        target_row = links.loc[links["tmdbId"] == int(target_tmdb_id)]
-        if target_row.empty:
+        # --- Map TMDB -> MovieLens
+        row = links.loc[links["tmdbId"] == int(target_tmdb_id)]
+        if row.empty:
             return pd.DataFrame()
-        
-        target_ml_id = int(target_row.iloc[0]["movieId"])
-        
-        # Precompute content-based recommendations first (usually faster)
+        target_ml_id = int(row.iloc[0]["movieId"])
+
+        # --- Content candidates: STRICTLY from (movies_df, rec_tfidf_matrix)
         content_recs = content_based_recommendations(
             target_movie_id=target_ml_id,
-            movies_df=movies,
-            tfidf_matrix=rec_tfidf_matrix,
-            top_n=top_n * 2  # Get fewer candidates initially
+            movies_df=movies_df,                 # <<< IMPORTANT: same df used to build TF-IDF
+            tfidf_matrix=rec_tfidf_matrix,       # <<< IMPORTANT: same matrix
+            top_n=top_n * 2
         )
-        
-        # Only compute CF recommendations if content-based has results
+
+        # If content fails, fall back to CF only
         if content_recs.empty:
-            # Fall back to CF if content-based fails
-            cf_recs = item_item_recommendations(
+            cf_only = item_item_recommendations(
                 target_tmdb_id=target_tmdb_id,
                 ratings=ratings,
-                movies=movies,
+                movies=movies_df,                # titles can be joined later; not used for sims
                 links=links,
-                min_overlap=5,  # Even lower threshold for fallback
+                min_overlap=15,
                 top_n=top_n
             )
-            return cf_recs.head(top_n)
-        
-        # Get CF recommendations in parallel with content processing
+            return cf_only.head(top_n)
+
+        # --- CF candidates: SAME function as CF UI
         cf_recs = item_item_recommendations(
             target_tmdb_id=target_tmdb_id,
             ratings=ratings,
-            movies=movies,
+            movies=movies_df,                    # safe to pass; titles merged later
             links=links,
-            min_overlap=15,  # Slightly lower threshold for hybrid
-            top_n=top_n * 2  # Get fewer candidates
+            min_overlap=15,
+            top_n=top_n * 2
         )
-        
-        # If CF fails, return content-based results
+
         if cf_recs.empty:
             return content_recs.head(top_n)
-        
-        # Precompute normalization parameters
-        cf_similarities = cf_recs['similarity'].values
-        content_similarities = content_recs['similarity'].values
-        
-        cf_max, cf_min = np.max(cf_similarities), np.min(cf_similarities)
-        content_max, content_min = np.max(content_similarities), np.min(content_similarities)
-        
-        # Normalize CF scores
+
+        # --- Normalize scores in each space
+        cf_sim = cf_recs["similarity"].values
+        cont_sim = content_recs["similarity"].values
+
+        cf_min, cf_max = float(np.min(cf_sim)), float(np.max(cf_sim))
+        ct_min, ct_max = float(np.min(cont_sim)), float(np.max(cont_sim))
+
+        cf_recs = cf_recs.copy()
+        content_recs = content_recs.copy()
+
+        cf_recs["cf_score_norm"] = cf_recs["similarity"].rank(pct=True)  # higher sim -> higher pct
+        content_recs["content_score_norm"] = content_recs["similarity"].rank(pct=True)
+
         if cf_max > cf_min:
-            cf_recs['cf_score_norm'] = (cf_similarities - cf_min) / (cf_max - cf_min)
+            cf_recs["cf_score_norm"] = (cf_sim - cf_min) / (cf_max - cf_min)
         else:
-            cf_recs['cf_score_norm'] = 1.0 if cf_max > 0 else 0.0
-        
-        # Normalize content scores
-        if content_max > content_min:
-            content_recs['content_score_norm'] = (content_similarities - content_min) / (content_max - content_min)
+            cf_recs["cf_score_norm"] = 0.0
+
+        if ct_max > ct_min:
+            content_recs["content_score_norm"] = (cont_sim - ct_min) / (ct_max - ct_min)
         else:
-            content_recs['content_score_norm'] = 1.0 if content_max > 0 else 0.0
-        
-        # Create lookup dictionaries for faster access
-        content_dict = {row['movieId']: row for _, row in content_recs.iterrows()}
-        cf_dict = {row['movieId']: row for _, row in cf_recs.iterrows()}
-        
-        # Get all unique movie IDs from both methods
-        all_movie_ids = set(content_dict.keys()) | set(cf_dict.keys())
-        
-        # Calculate hybrid scores
-        hybrid_scores = []
-        for movie_id in all_movie_ids:
-            cf_data = cf_dict.get(movie_id, {})
-            content_data = content_dict.get(movie_id, {})
-            
-            cf_score = cf_data.get('cf_score_norm', 0.0)
-            content_score = content_data.get('content_score_norm', 0.0)
-            
-            # Calculate hybrid score
-            hybrid_score = (cf_weight * cf_score) + (content_weight * content_score)
-            
-            # Use title from whichever source has it
-            title = cf_data.get('title') or content_data.get('title', 'Unknown')
-            
-            # Get TMDB ID if available
-            tmdb_id = 0
-            if movie_id in cf_dict and 'tmdbId' in cf_dict[movie_id]:
-                tmdb_id = cf_dict[movie_id]['tmdbId']
-            else:
-                # Look up TMDB ID from links
-                link_row = links.loc[links['movieId'] == movie_id]
-                if not link_row.empty:
-                    tmdb_id = int(link_row.iloc[0]['tmdbId'])
-            
-            hybrid_scores.append({
-                'movieId': movie_id,
-                'title': title,
-                'tmdbId': tmdb_id,
-                'cf_score': cf_score,
-                'content_score': content_score,
-                'hybrid_score': hybrid_score,
-                'avg_rating': cf_data.get('avg_rating', content_data.get('avg_rating', np.nan)),
-                'rating_cnt': cf_data.get('rating_cnt', content_data.get('rating_count', 0))
+            content_recs["content_score_norm"] = 0.0
+
+               # --- Blend
+        cont_dict = {int(r.movieId): r for _, r in content_recs.iterrows()}
+        cf_dict   = {int(r.movieId): r for _, r in cf_recs.iterrows()}
+        all_ids = set(cont_dict) | set(cf_dict)
+
+        rows = []
+        for mid in all_ids:
+            c_row = cont_dict.get(mid)
+            f_row = cf_dict.get(mid)
+
+            c = float(c_row["content_score_norm"]) if c_row is not None else np.nan
+            f = float(f_row["cf_score_norm"])      if f_row is not None else np.nan
+
+            w_c = content_weight if not np.isnan(c) else 0.0
+            w_f = cf_weight      if not np.isnan(f) else 0.0
+            denom = w_c + w_f
+            hybrid = (w_c * (0.0 if np.isnan(c) else c) + w_f * (0.0 if np.isnan(f) else f)) / denom if denom > 0 else 0.0
+
+            # title + tmdbId
+            title = None
+            tmdb  = None
+            if f_row is not None:
+                title = f_row.get("title", None)
+                tmdb  = int(f_row.get("tmdbId", 0)) if pd.notna(f_row.get("tmdbId", np.nan)) else None
+            if (title is None or pd.isna(title)) and c_row is not None:
+                title = c_row.get("title", None)
+            if tmdb is None:
+                link = links.loc[links["movieId"] == mid]
+                tmdb = int(link.iloc[0]["tmdbId"]) if not link.empty else 0
+
+            rows.append({
+                "movieId": mid,
+                "title": title,
+                "tmdbId": tmdb,
+                "cf_score": f,
+                "content_score": c,
+                "hybrid_score": hybrid,
+                "avg_rating": (f_row.get("avg_rating") if f_row is not None else c_row.get("avg_rating") if c_row is not None else np.nan),
+                "rating_cnt": (f_row.get("rating_cnt") if f_row is not None else c_row.get("rating_count") if c_row is not None else 0),
             })
-        
-        # Convert to DataFrame and sort by hybrid score
-        hybrid_df = pd.DataFrame(hybrid_scores)
-        hybrid_df = hybrid_df.sort_values('hybrid_score', ascending=False).head(top_n)
-        
-        if not hybrid_df.empty and 'hybrid_score' not in hybrid_df.columns:
-            # Calculate hybrid score if missing
-            hybrid_df['hybrid_score'] = (cf_weight * hybrid_df.get('cf_score', 0.0)) + \
-                                    (content_weight * hybrid_df.get('content_score', 0.0))
-        
-        return hybrid_df
-    
+
+        out = pd.DataFrame(rows).sort_values("hybrid_score", ascending=False).head(top_n)
+        return out
+
     except Exception as e:
         print(f"Hybrid filtering error: {e}")
         return pd.DataFrame()
+
 
 def render_hybrid_section_horizontal(target_tmdb_id: int):
     """Render Hybrid recommendations using the horizontal 'rec-card' design; reuse cached HTML on reruns."""
@@ -895,12 +884,12 @@ def render_hybrid_section_horizontal(target_tmdb_id: int):
         recs = hybrid_recommendations(
             target_tmdb_id=target_tmdb_id,
             ratings=ratings,
-            movies=movies,
-            links=links,
+            links=links,            # <- keep
             cf_weight=0.6,
             content_weight=0.4,
             top_n=12
         )
+
 
         if recs.empty:
             st.info("No hybrid recommendations available.")
@@ -1023,22 +1012,48 @@ def evaluate_algorithm_for_seed(
             pass
 
     elif algorithm_type == "cf":
-        # fast item–item CF that uses the seed MovieLens id
-        rec_movie_ids = _recommend_cf_seed(seed_ml_movie_id, ratings, min_overlap=15, top_n=top_k)
-        # collect CF similarities
-        try:
-            R_csr, B_csr, mlid_to_row, row_to_mlid, norms = build_item_user_sparse(ratings)
-            seed_row = mlid_to_row.get(int(seed_ml_movie_id))
-            if seed_row is not None:
+        # Use the same CF pipeline as the UI (Pearson corr + min_overlap)
+        # 1) Ensure we have the seed's MovieLens ID
+        seed_ml = int(seed_ml_movie_id)
+
+        # 2) Get CF recommendations exactly like the UI
+        cf_recs_df = item_item_recommendations(
+            target_tmdb_id=(tmdb_id if tmdb_id is not None else int(
+                links.loc[links["movieId"] == seed_ml, "tmdbId"].iloc[0]
+            )),
+            ratings=ratings,
+            movies=movies,
+            links=links,
+            min_overlap=15,      # keep this the same as your UI section
+            top_n=top_k
+        )
+
+        # If no recs, bail early
+        if cf_recs_df.empty:
+            rec_movie_ids = []
+            score_list = []
+        else:
+            rec_movie_ids = list(map(int, cf_recs_df["movieId"].tolist()))
+
+            # 3) Pull the same Pearson correlation matrix (with the same min_overlap)
+            corr_mat, valid_movies = build_cached_correlation_matrix(ratings, min_overlap=15)
+
+            score_list = []
+            if (seed_ml in valid_movies) and (seed_ml in corr_mat.columns):
+                col = corr_mat[seed_ml]  # similarities vs seed (Pearson)
                 for mid in rec_movie_ids:
-                    rec_row = mlid_to_row.get(int(mid))
-                    if rec_row is not None:
-                        numer = (R_csr[seed_row] @ R_csr[rec_row].T).toarray()[0][0]
-                        denom = norms[seed_row] * norms[rec_row]
-                        if denom != 0:
-                            score_list.append(float(numer / denom))
-        except Exception:
-            pass
+                    if (mid in valid_movies) and (mid in corr_mat.index):
+                        sim_val = col.get(mid, float('nan'))
+                        if pd.notna(sim_val):
+                            score_list.append(float(sim_val))
+                        else:
+                            score_list.append(0.0)
+                    else:
+                        score_list.append(0.0)
+            else:
+                # Seed wasn't in the valid set; fallback to zeros to avoid crashing
+                score_list = [0.0] * len(rec_movie_ids)
+
 
     elif algorithm_type == "hybrid":
         # hybrid needs tmdb_id for your existing pipeline
@@ -1051,12 +1066,12 @@ def evaluate_algorithm_for_seed(
             hybrid_recs = hybrid_recommendations(
                 target_tmdb_id=int(tmdb_id),
                 ratings=ratings,
-                movies=movies,
                 links=links,
                 cf_weight=0.6,
                 content_weight=0.4,
                 top_n=top_k
             )
+
             if not hybrid_recs.empty:
                 rec_movie_ids = list(map(int, hybrid_recs["movieId"].tolist()))
                 if "hybrid_score" in hybrid_recs.columns:
@@ -1334,6 +1349,12 @@ if not movies_df.empty and not rating_stats_df.empty:
 if not movies_df.empty and not movie_tags_df.empty:
     movies_df = movies_df.merge(movie_tags_df, on='movieId', how='left')
     movies_df['tag'] = movies_df['tag'].fillna('')
+    movies_df["genre_list"] = (
+        movies_df["genres"].fillna("")
+        .str.replace("(no genres listed)", "", regex=False)
+        .str.split("|")
+        .apply(lambda lst: [g for g in lst if g])  # drop empty strings
+    )
 else:
     movies_df['tag'] = ''
 
@@ -1912,7 +1933,16 @@ with tabs[1]:
             "Hybrid": summarize_scores(hybrid_scores),
         }
         df = pd.DataFrame(summary).T[["N","Mean","Std","Min","25%","50%","75%","Max"]]
-        fmt = {k:"{:.3f}" for k in ["Mean","Std","Min","25%","50%","75%","Max"]}
+        fmt = {
+            "N": "{:.0f}",  # no decimals
+            "Mean": "{:.3f}",
+            "Std": "{:.3f}",
+            "Min": "{:.3f}",
+            "25%": "{:.3f}",
+            "50%": "{:.3f}",
+            "75%": "{:.3f}",
+            "Max": "{:.3f}",
+        }        
         st.dataframe(df.style.format(fmt))
         st.download_button("⬇️ Download CSV", data=df.to_csv().encode("utf-8"),
                             file_name="score_distribution_summary.csv", mime="text/csv")
