@@ -40,23 +40,135 @@ def search_tmdb_by_title(movie_title, year=None):
             "query": movie_title,
             "language": "en-US"
         }
-        if year:
+        if year and pd.notna(year):
             params["year"] = int(year)
         
         r = requests.get(url, params=params, timeout=10)
         r.raise_for_status()
         results = r.json().get("results", [])
         return results[0] if results else None
-    except Exception:
+    except Exception as e:
+        print(f"TMDB search error: {e}")
         return None
 
+def clean_title_for_search(title):
+    """Clean movie title for better TMDB search results"""
+    # Remove common suffixes that might interfere with search
+    title = re.sub(r'\s*\(.*?\)\s*$', '', title)  # Remove anything in parentheses at the end
+    title = re.sub(r'\s*,\s*The\s*$', '', title, flags=re.IGNORECASE)  # Remove ", The" at the end
+    title = re.sub(r'^\s*The\s+', '', title, flags=re.IGNORECASE)  # Remove "The " at the beginning
+    title = title.strip()
+    return title
+
 @st.cache_data
-def get_poster_for_movie(movie_title, year=None):
-    """Get poster URL for a movie from TMDB"""
-    tmdb_result = search_tmdb_by_title(movie_title, year)
-    if tmdb_result and tmdb_result.get('poster_path'):
-        return f"https://image.tmdb.org/t/p/w300{tmdb_result['poster_path']}"
+def get_poster_for_movie(original_title, clean_title, year=None):
+    """Get poster URL for a movie from TMDB with improved fallback strategies"""
+    
+    # Strategy 1: Try with clean title and year
+    if clean_title and year and pd.notna(year):
+        tmdb_result = search_tmdb_by_title(clean_title, year)
+        if tmdb_result and tmdb_result.get('poster_path'):
+            return f"https://image.tmdb.org/t/p/w300{tmdb_result['poster_path']}"
+    
+    # Strategy 2: Try with clean title only
+    if clean_title:
+        tmdb_result = search_tmdb_by_title(clean_title)
+        if tmdb_result and tmdb_result.get('poster_path'):
+            return f"https://image.tmdb.org/t/p/w300{tmdb_result['poster_path']}"
+    
+    # Strategy 3: Try with further cleaned title
+    if clean_title:
+        further_cleaned = clean_title_for_search(clean_title)
+        if further_cleaned and further_cleaned != clean_title:
+            tmdb_result = search_tmdb_by_title(further_cleaned, year if pd.notna(year) else None)
+            if tmdb_result and tmdb_result.get('poster_path'):
+                return f"https://image.tmdb.org/t/p/w300{tmdb_result['poster_path']}"
+    
+    # Strategy 4: Try with original title (includes year) - last resort
+    if original_title and original_title != clean_title:
+        # Extract just the title part from original title if it has year
+        title_only = re.sub(r'\s*\(\d{4}\)\s*$', '', original_title).strip()
+        if title_only:
+            tmdb_result = search_tmdb_by_title(title_only, year if pd.notna(year) else None)
+            if tmdb_result and tmdb_result.get('poster_path'):
+                return f"https://image.tmdb.org/t/p/w300{tmdb_result['poster_path']}"
+    
     return None
+
+def is_valid_movie_title(title):
+    """Check if a movie title is valid and not a placeholder"""
+    if not title or not isinstance(title, str):
+        return False
+    
+    title_lower = title.lower().strip()
+    
+    # List of invalid/placeholder titles to filter out
+    invalid_titles = [
+        'untitled',
+        'no title',
+        'unknown',
+        'tba',
+        'to be announced',
+        'placeholder',
+        'temp',
+        'test',
+        'sample'
+    ]
+    
+    # Check if title starts with any invalid patterns
+    for invalid in invalid_titles:
+        if title_lower.startswith(invalid):
+            return False
+    
+    # Check for very short titles (less than 2 characters)
+    if len(title_lower) < 2:
+        return False
+    
+    # Check for titles that are just numbers or special characters
+    if re.match(r'^[\d\s\-_\.]+$', title_lower):
+        return False
+    
+    return True
+
+def has_sufficient_movie_data(movie_row):
+    """Check if movie has sufficient data to display properly"""
+    # Check for valid title
+    title = movie_row.get('clean_title', movie_row.get('title', ''))
+    if not is_valid_movie_title(title):
+        return False
+    
+    # Check for valid genres (not just "(no genres listed)")
+    genres = movie_row.get('genres', '')
+    if not genres or genres == "(no genres listed)" or pd.isna(genres):
+        return False
+    
+    # Check if it has a valid year (helps with TMDB lookup)
+    year = movie_row.get('year')
+    if pd.isna(year) or year == 0:
+        # Allow movies without year only if they have other good data
+        pass
+    
+    return True
+
+@st.cache_data
+def check_movie_quality(original_title, clean_title, year, genres):
+    """Check if a movie meets quality standards for display"""
+    # Check title validity
+    if not is_valid_movie_title(clean_title) and not is_valid_movie_title(original_title):
+        return False, None
+    
+    # Check genre validity
+    if not genres or genres == "(no genres listed)":
+        return False, None
+    
+    # Try to get poster
+    poster_url = get_poster_for_movie(original_title, clean_title, year if pd.notna(year) else None)
+    
+    # If no poster AND problematic title, filter out
+    if not poster_url and not is_valid_movie_title(clean_title):
+        return False, None
+    
+    return True, poster_url
 
 # Load movies data
 @st.cache_data
@@ -74,7 +186,7 @@ def load_movie_data():
         
         # Create genres as a string instead of a list to avoid hashing issues
         df['genres_str'] = df['genres'].str.replace('|', ' ')
-                
+        
         return df
     except FileNotFoundError:
         st.error("❌ movies.csv not found. Please check the dataset path.")
@@ -125,7 +237,6 @@ def load_ratings_with_stats():
 movies_df = load_movie_data()
 # Create genre_list as a string representation to avoid hashing issues
 movies_df['genre_list'] = movies_df['genres'].str.split('|').apply(lambda x: ', '.join(x))
-
 tags_df, movie_tags_df = load_tags_data()
 ratings_df, rating_stats_df = load_ratings_with_stats()
 
@@ -142,6 +253,15 @@ if not movies_df.empty and not movie_tags_df.empty:
 else:
     movies_df['tag'] = ''
 
+# QUALITY FILTER: Remove movies with insufficient data
+if not movies_df.empty:
+    print(f"Before quality filter: {len(movies_df)} movies")
+    
+    # Apply quality filter
+    movies_df = movies_df[movies_df.apply(has_sufficient_movie_data, axis=1)]
+    
+    print(f"After quality filter: {len(movies_df)} movies")
+
 # Cache vectorizer and tf-idf matrix for SEARCH (title + genres only, NO tags)
 @st.cache_resource
 def get_search_vectorizer_and_matrix(dataframe):
@@ -154,12 +274,32 @@ def get_search_vectorizer_and_matrix(dataframe):
     dataframe['search_blob'] = (
         dataframe['title'] + ' ' + 
         dataframe['clean_title'] + ' ' + 
-        dataframe['genres_str']
+        dataframe['genres'].str.replace('|', ' ')
     )
     
     vectorizer = TfidfVectorizer(stop_words='english', max_features=5000)
     tfidf_matrix = vectorizer.fit_transform(dataframe['search_blob'])
     return vectorizer, tfidf_matrix
+
+def calculate_exact_match_bonus(query, title, clean_title):
+    """Calculate bonus score for exact or partial matches"""
+    query_lower = query.lower().strip()
+    title_lower = title.lower()
+    clean_title_lower = clean_title.lower()
+    
+    # Exact match gets highest bonus
+    if query_lower == clean_title_lower or query_lower == title_lower:
+        return 1.0
+    
+    # Partial match at start of title gets medium bonus
+    if clean_title_lower.startswith(query_lower) or title_lower.startswith(query_lower):
+        return 0.5
+    
+    # Contains query gets small bonus
+    if query_lower in clean_title_lower or query_lower in title_lower:
+        return 0.2
+    
+    return 0.0
 
 if not movies_df.empty:
     # For search functionality (title + genres only)
@@ -512,18 +652,36 @@ search_query = st.text_input(
 
 st.button("Find Movies", type="primary")
 
+# FIXED SEARCH RESULTS SECTION
 if search_query and not movies_df.empty:
     with st.spinner('🔍 Searching with NLP and vector similarity...'):
         # Use SEARCH vectorizer (title + genres only, NO tags)
         query_vec = search_vectorizer.transform([search_query])
         similarity_scores = cosine_similarity(query_vec, search_tfidf_matrix).flatten()
-        top_indices = similarity_scores.argsort()[::-1][:50]
-        results = movies_df.iloc[top_indices]
         
-        # Filter out results with very low similarity scores
-        results_with_scores = results.copy()
-        results_with_scores['similarity'] = similarity_scores[top_indices]
-        results = results_with_scores[results_with_scores['similarity'] > 0.01].head(20)
+        # Get top 50 results first
+        top_indices = similarity_scores.argsort()[::-1][:50]
+        results = movies_df.iloc[top_indices].copy()
+        
+        # Add similarity scores
+        results['similarity'] = similarity_scores[top_indices]
+        
+        # Calculate exact match bonus for better ranking
+        results['exact_match_bonus'] = results.apply(
+            lambda row: calculate_exact_match_bonus(search_query, row['title'], row['clean_title']), 
+            axis=1
+        )
+        
+        # Create combined score: similarity + exact match bonus
+        results['combined_score'] = results['similarity'] + results['exact_match_bonus']
+        
+        # Sort by combined score (exact matches will appear first even with same similarity)
+        results = results.sort_values('combined_score', ascending=False)
+        
+        # Apply lower threshold for common words like "the" to show more results
+        # Use dynamic threshold: lower for short queries, higher for longer ones
+        min_threshold = max(0.001, 0.01 - (len(search_query.split()) * 0.002))
+        results = results[results['similarity'] > min_threshold].head(20)
 
         if not results.empty:
             st.markdown(f'<div class="results-count">Showing {len(results)} results</div>', unsafe_allow_html=True)
@@ -531,41 +689,68 @@ if search_query and not movies_df.empty:
             for _, result in results.iterrows():
                 movie_id = result.get('movieId')
                 title = result.get('clean_title', result.get('title', 'No Title'))
+                original_title = result.get('title', title)  # Keep original title with year
                 year = result.get('year', '')
                 avg_rating = result.get('avg_rating', 0)
                 rating_count = result.get('rating_count', 0)
-                genres = result.get('genre_list', '')
+                
+                # FIX: Properly handle genres from the original 'genres' column
+                raw_genres = result.get('genres', '')
+                if raw_genres and raw_genres != "(no genres listed)":
+                    # Split by pipe and clean up
+                    genre_list = [g.strip() for g in raw_genres.split('|') if g.strip()]
+                else:
+                    genre_list = []
+                
                 similarity = result.get('similarity', 0)
 
-                # Get poster URL from TMDB
-                poster_url = get_poster_for_movie(title, year if pd.notna(year) else None)
+                # Get poster URL from TMDB using improved function (only when displaying)
+                poster_url = get_poster_for_movie(original_title, title, year if pd.notna(year) else None)
 
-                # Create poster HTML
+                # Create poster HTML with better error handling and fallback
                 if poster_url:
-                    poster_html = f'<img src="{poster_url}" class="movie-poster" alt="{title} Poster">'
+                    poster_html = f'<img src="{poster_url}" class="movie-poster" alt="{title} Poster" loading="lazy" onerror="this.style.display=\'none\'; this.nextElementSibling.style.display=\'flex\';"><div class="movie-placeholder" style="display: none;">🎬</div>'
                 else:
                     poster_html = '<div class="movie-placeholder">🎬</div>'
 
-                # Create clickable movie card with poster
-                st.markdown(f"""
-                    <a href="?movie_id={movie_id}" style="text-decoration: none; color: inherit;">
-                        <div class="movie-card">
-                            {poster_html}
-                            <div class="movie-info">
-                                <h3 class="movie-title">{title}</h3>
-                                <div class="movie-meta">
-                                    {f'<span class="release-year">📅 {int(year)}</span>' if pd.notna(year) else ''}
-                                    {f'<span class="movie-rating">⭐ {avg_rating:.1f}</span>' if avg_rating > 0 else '<span class="movie-rating">⭐ Not rated</span>'}
-                                    {f'<span class="rating-count">({int(rating_count)} ratings)</span>' if rating_count > 0 else ''}
-                                    <span style="color: #10B981; font-size: 0.85rem;">Match: {similarity:.1%}</span>
-                                </div>
-                                <div style="margin-top: 10px;">
-                                    {' '.join([f'<span class="genre-badge">{g}</span>' for g in genres.split(', ') if g and g != "(no genres listed)"]) if genres else ''}
-                                </div>
+                # Escape any special characters in title to prevent HTML issues
+                safe_title = title.replace('"', '&quot;').replace("'", "&#39;").replace('<', '&lt;').replace('>', '&gt;')
+                
+                # FIX: Build genre badges with proper genre names
+                genre_badges = ''
+                if genre_list:
+                    # Take first 5 genres and create badges
+                    safe_genres = [g.replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;') for g in genre_list[:5]]
+                    genre_badges = ''.join([f'<span class="genre-badge">{g}</span>' for g in safe_genres])
+
+                # Create clickable movie card with poster - maintain original horizontal design
+                year_display = f'<span class="release-year">📅 {int(year)}</span>' if pd.notna(year) else ''
+                rating_display = f'<span class="movie-rating">⭐ {avg_rating:.1f}</span>' if avg_rating > 0 else '<span class="movie-rating">⭐ Not rated</span>'
+                count_display = f'<span class="rating-count">({int(rating_count)} ratings)</span>' if rating_count > 0 else ''
+                match_display = f'<span style="color: #10B981; font-size: 0.85rem;">Match: {similarity:.1%}</span>'
+                
+                # Build the complete movie card HTML with proper structure
+                movie_card_html = f"""
+                <a href="?movie_id={movie_id}" style="text-decoration: none; color: inherit;">
+                    <div class="movie-card">
+                        {poster_html}
+                        <div class="movie-info">
+                            <h3 class="movie-title">{safe_title}</h3>
+                            <div class="movie-meta">
+                                {year_display}
+                                {rating_display}
+                                {count_display}
+                                {match_display}
+                            </div>
+                            <div style="margin-top: 10px;">
+                                {genre_badges}
                             </div>
                         </div>
-                    </a>
-                """, unsafe_allow_html=True)
+                    </div>
+                </a>
+                """
+                
+                st.markdown(movie_card_html, unsafe_allow_html=True)
         else:
             st.warning("No movies found matching your search. Try different keywords!")
 elif search_query:
