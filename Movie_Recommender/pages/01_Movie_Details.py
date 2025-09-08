@@ -1633,183 +1633,21 @@ try:
     # Content-Based Filtering (MovieLens-based)
     if detail_id_int is not None and not movies_df.empty:
         render_content_based_recommendations(detail_id_int, movies_df, rec_vectorizer, rec_tfidf_matrix)
-
-        # content_eval_slot = st.empty()
-
-        # # Content-Based evaluation (SEEDED)
-        # if st.button("Evaluate Content-Based Algorithm", key="eval_content"):
-        #     ratings_small, movies_small, links_small = load_ml_small()
-        #     if detail_id_int is None:
-        #         st.warning("This evaluation needs a MovieLens movieId.")
-        #     else:
-        #         _, content_similarities = evaluate_algorithm_for_seed(
-        #             "content",
-        #             seed_ml_movie_id=int(detail_id_int),
-        #             tmdb_id=tmdb_id,
-        #             ratings=ratings_small,
-        #             movies=movies_small,
-        #             links=links_small,
-        #             top_k=TOP_K
-        #         )
-        #         fig = plot_score_distribution("Content-Based Similarity Distribution", content_similarities, "Similarity")
-        #         st.session_state["figs"]["content_scores_fig"] = fig
-
-        # # show only the histogram
-        # if st.session_state["figs"].get("content_scores_fig") is not None:
-        #     st.pyplot(st.session_state["figs"]["content_scores_fig"])
-
-
-                
-
+        
     # In the collaborative filtering section, add the evaluation button and display
     if tmdb_id is not None:
         render_cf_section_horizontal(int(tmdb_id))
-        
-        # # Add evaluation button for collaborative filtering
-        # cf_eval_slot = st.empty()
-
-        # # Collaborative Filtering evaluation (SEEDED)
-        # if st.button("Evaluate Collaborative Filtering Algorithm", key="eval_cf"):
-        #     ratings_small, movies_small, links_small = load_ml_small()
-        #     if detail_id_int is None:
-        #         st.warning("This evaluation needs a MovieLens movieId.")
-        #     else:
-        #         _, cf_similarities = evaluate_algorithm_for_seed(
-        #             "cf",
-        #             seed_ml_movie_id=int(detail_id_int),
-        #             tmdb_id=tmdb_id,
-        #             ratings=ratings_small,
-        #             movies=movies_small,
-        #             links=links_small,
-        #             top_k=TOP_K
-        #         )
-        #         fig = plot_score_distribution("Collaborative Filtering Similarity Distribution", cf_similarities, "Similarity")
-        #         st.session_state["figs"]["cf_scores_fig"] = fig
-
-        # # show only the histogram
-        # if st.session_state["figs"].get("cf_scores_fig") is not None:
-        #     st.pyplot(st.session_state["figs"]["cf_scores_fig"])
-
-
                 
 
     # In the hybrid recommendations section, add the evaluation button and display
     if tmdb_id is not None:
         render_hybrid_section_horizontal(int(tmdb_id))
         
-        # # Add evaluation button for hybrid
-        # hybrid_eval_slot = st.empty()
-
-        # # Hybrid evaluation (SEEDED)
-        # if st.button("Evaluate Hybrid Algorithm", key="eval_hybrid"):
-        #     ratings_small, movies_small, links_small = load_ml_small()
-        #     if detail_id_int is None:
-        #         st.warning("This evaluation needs a MovieLens movieId.")
-        #     else:
-        #         _, hybrid_scores = evaluate_algorithm_for_seed(
-        #             "hybrid",
-        #             seed_ml_movie_id=int(detail_id_int),
-        #             tmdb_id=tmdb_id,
-        #             ratings=ratings_small,
-        #             movies=movies_small,
-        #             links=links_small,
-        #             top_k=TOP_K
-        #         )
-        #         fig = plot_score_distribution("Hybrid Score Distribution", hybrid_scores, "Hybrid Score")
-        #         st.session_state["figs"]["hybrid_scores_fig"] = fig
-
-        # # show only the histogram
-        # if st.session_state["figs"].get("hybrid_scores_fig") is not None:
-        #     st.pyplot(st.session_state["figs"]["hybrid_scores_fig"])
-
 
     
 except Exception as e:
     st.warning(f"Recommendations unavailable: {e}")
 
-# st.markdown("---")
-# st.header("📊 Score Distribution Summary")
-# st.caption("Per-algorithm distribution of similarity / hybrid scores for Top-K recommendations of the selected seed movie.")
-
-# if st.button("🔎 Compare Score Distributions", key="compare_score_distributions"):
-#     with st.spinner("Computing score distributions..."):
-#         ratings_small, movies_small, links_small = load_ml_small()
-#         if detail_id_int is None:
-#             st.warning("This comparison needs a MovieLens movieId.")
-#         else:
-#             # get only the score lists (we ignore the precision/recall metrics)
-#             _, content_scores = evaluate_algorithm_for_seed(
-#                 "content",
-#                 seed_ml_movie_id=int(detail_id_int),
-#                 tmdb_id=tmdb_id,
-#                 ratings=ratings_small,
-#                 movies=movies_small,
-#                 links=links_small,
-#                 top_k=TOP_K
-#             )
-#             _, cf_scores = evaluate_algorithm_for_seed(
-#                 "cf",
-#                 seed_ml_movie_id=int(detail_id_int),
-#                 tmdb_id=tmdb_id,
-#                 ratings=ratings_small,
-#                 movies=movies_small,
-#                 links=links_small,
-#                 top_k=TOP_K
-#             )
-#             _, hybrid_scores = evaluate_algorithm_for_seed(
-#                 "hybrid",
-#                 seed_ml_movie_id=int(detail_id_int),
-#                 tmdb_id=tmdb_id,
-#                 ratings=ratings_small,
-#                 movies=movies_small,
-#                 links=links_small,
-#                 top_k=TOP_K
-#             )
-
-#             # summarize
-#             summary = {
-#                 "Content-Based": summarize_scores(content_scores),
-#                 "Collaborative": summarize_scores(cf_scores),
-#                 "Hybrid": summarize_scores(hybrid_scores),
-#             }
-#             df = pd.DataFrame(summary).T[
-#                 ["N", "Mean", "Std", "Min", "25%", "50%", "75%", "Max"]
-#             ]
-#             st.session_state["score_distribution_table"] = df
-
-# # show the distribution table (no precision/recall/F1, no graphs)
-# if "score_distribution_table" in st.session_state:
-#     fmt = {k: "{:.3f}" for k in ["Mean", "Std", "Min", "25%", "50%", "75%", "Max"]}
-#     st.dataframe(st.session_state["score_distribution_table"].style.format(fmt))
-
-
-# st.markdown("---")
-# st.subheader("📝 Quick Feedback")
-# with st.form("feedback_form"):
-#     algo_viewed = st.selectbox("Which algorithm are you evaluating?", ["Content-Based", "Collaborative", "Hybrid"])
-#     q_rel = st.slider("How relevant were the recommendations?", 1, 5, 3)
-#     q_sat = st.slider("Overall satisfaction?", 1, 5, 3)
-#     q_div = st.slider("Perceived diversity?", 1, 5, 3)
-#     comments = st.text_area("Any comments?")
-#     submitted = st.form_submit_button("Submit feedback")
-#     if submitted:
-#         fb_row = {
-#             "timestamp": int(time.time()),
-#             "movieId": detail_id_int,
-#             "tmdbId": tmdb_id,
-#             "algorithm": algo_viewed,
-#             "relevance": q_rel,
-#             "satisfaction": q_sat,
-#             "diversity": q_div,
-#             "comments": comments
-#         }
-#         fb_file = "user_feedback.csv"
-#         if os.path.exists(fb_file):
-#             existing = pd.read_csv(fb_file)
-#             pd.concat([existing, pd.DataFrame([fb_row])], ignore_index=True).to_csv(fb_file, index=False)
-#         else:
-#             pd.DataFrame([fb_row]).to_csv(fb_file, index=False)
-#         st.success("Thanks for your feedback!")
 
 # ------------------ EVALUATION HUB + FEEDBACK ------------------
 st.markdown("---")
@@ -1821,17 +1659,9 @@ with st.container():
     c1, c2 = st.columns([1, 1])
     with c1:
         top_k = st.slider("Top-K", 5, 30, TOP_K, help="How many recs to evaluate per algorithm")
-    # with c2:
-    #     pos_threshold = st.slider("Positive ≥", 3.0, 5.0, POS_THRESHOLD, 0.5,
-    #                               help="What counts as a 'positive' rating")
     with c2:
         run_all = st.checkbox("Run all", value=False, help="Evaluate Content, CF, and Hybrid together")
-    # with c4:
-    #     st.markdown(
-    #         f"""<span class="kpi-pill">Seed: {detail_id_int or "—"}</span>
-    #             <span class="kpi-pill">TMDB: {tmdb_id or "—"}</span>""",
-    #         unsafe_allow_html=True
-    #     )
+
 
 # Make sliders affect the evaluator (don’t touch global constants)
 _local_TOP_K = int(top_k)
@@ -1875,14 +1705,6 @@ with tabs[0]:
                             "Content" if key_prefix=="content" else
                             "CF" if key_prefix=="cf" else "hybrid"
                         )
-                        # KPIs
-                        # cards = "".join([
-                        #     kpi_card("Precision@K", m.get("Precision@K", 0.0)),
-                        #     kpi_card("Recall@K",    m.get("Recall@K",    0.0)),
-                        #     kpi_card("F1@K",       m.get("F1@K",       0.0)),
-                        # ])
-                        # st.markdown(f'<div class="metric-row">{cards}</div>', unsafe_allow_html=True)
-
                         # Distribution
                         label = "Similarity" if key_prefix!="hybrid" else "Hybrid Score"
                         fig = plot_score_distribution(f"{title} — Score Distribution", s, label)
@@ -1896,12 +1718,6 @@ with tabs[0]:
                     # Show last run if available
                     prev = st.session_state["evaluation_cache"].get(key_prefix, {}).get(detail_id_int)
                     if prev:
-                        # cards = "".join([
-                        #     kpi_card("Precision@K", prev["metrics"].get("Precision@K", 0.0)),
-                        #     kpi_card("Recall@K",    prev["metrics"].get("Recall@K",    0.0)),
-                        #     kpi_card("F1@K",       prev["metrics"].get("F1@K",       0.0)),
-                        # ])
-                        # st.markdown(f'<div class="metric-row">{cards}</div>', unsafe_allow_html=True)
                         st.pyplot(st.session_state["figs"].get(f"{key_prefix}_scores_fig"))
                     else:
                         st.caption("No results yet. Click **Run** to evaluate.")
